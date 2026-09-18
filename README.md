@@ -21,3 +21,7 @@ Two build settings are fixed on purpose:
 
 - **Compiler baselines**: C/C++ code is built with `-march=x86-64-v2` and CUDA code for `sm_89` only. `-march=native` on a development CPU with AVX-512 produces binaries that fault with illegal instructions on AVX2-only cluster nodes.
 - **Cache locations**: FlashInfer (`FLASHINFER_WORKSPACE_BASE`), Triton (`TRITON_CACHE_DIR`), tvm-ffi (`TVM_FFI_CACHE_DIR`) and Hugging Face (`HF_HOME`) caches are redirected out of `$HOME`, which is small on shared clusters. `make env-check` fails if any of them resolves under `$HOME`.
+
+## Correctness
+
+`tests/test_consistency.py` is the correctness anchor: greedy decoding must match Hugging Face transformers token for token (same checkpoint, BF16, same seed). The model in `miniserve/model/qwen3.py` is a plain-PyTorch reference path that mirrors the transformers op order and precision, so its prefill logits are required to be bitwise equal to HF, which is stricter than token equality: a wrong norm weight in one layer can leave 64 greedy tokens unchanged while shifting logits by ~1.9. Optimized paths are checked against the same tests.
