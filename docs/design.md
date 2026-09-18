@@ -31,6 +31,25 @@ decoding.
 
 Greedy output must match HF `transformers` token for token (same BF16 weights, same seed). Every feature that touches the forward path or the cache (batching, paged KV, radix cache, chunked prefill, CUDA Graphs, overlap, the C++ core) is required to leave greedy output unchanged, both for a single request and under a mixed concurrent load. The anchor is re-run on each platform the engine runs on.
 
+Two levels of strictness apply. The plain-PyTorch reference model mirrors the transformers op order, so its prefill logits must be bitwise equal to HF. Paths that change GEMM shapes or kernels (batching, FlashInfer attention, fused norms) cannot be bitwise equal in BF16: even incremental decoding versus a full forward pass of the same sequence differs by up to 0.34 in logits, enough to flip argmax where the top two logits are one BF16 ulp apart. For those paths a sequence may diverge from the reference only at a position where the reference top-1/top-2 logit gap is at most ε; comparison of that sequence stops there. Divergence at a larger gap is a bug. Reports state ε and the divergence rate.
+
+## Blueprint
+
+Pinned at [`sgl-project/mini-sglang@9a91cfa`](https://github.com/sgl-project/mini-sglang/tree/9a91cfafe754aa85daee49998176275667eb58f2) (2026-05-17). All comparisons and module-by-module notes refer to this commit.
+
+Where this engine deliberately differs:
+
+| Area | mini-sglang | mini-serve | Why |
+|---|---|---|---|
+| Process model | API server, tokenizer, detokenizer and per-rank scheduler processes over ZMQ | One process: asyncio server, engine thread, tokenizer thread pool | No tensor parallelism, so multiple processes only add IPC |
+| KV page size | 1 (its FlashInfer path asserts `page_size == 1`) | 16 by default, configurable | Smaller page tables and radix trees; requires real paged indices for FlashInfer |
+| Admission | Reserves `prompt + max_tokens` KV slots up front; no preemption | Admission against a KV budget with preemption and pluggable policies (FCFS, shortest-first, cache-aware) | Lets 256 concurrent requests share a small pool, and makes scheduling policy an ablation axis |
+| KV pool sizing | 90% of free memory minus weights | Peak activation profiled, plus an explicit `--kv-pool-tokens` override | Pool size is an experiment variable |
+| Allocator / radix tree | Python, GPU-tensor free list, full-tree scan on each eviction | Python reference first, then a C++ core with the same tests | Data-structure hot paths moved to C++ |
+| Reference model | Fused FlashInfer ops from the start | Bitwise-HF reference path first; fused ops compared against it | Correctness anchor above |
+
+CUDA Graph batch-size buckets differ by default between mini-sglang (up to 160), sglang 0.5.10 (up to 32) and this engine; comparisons set them explicitly and record them in the fairness checklist.
+
 ## Architecture
 
 **Single process.** mini-sglang splits API server, tokenizer, detokenizer and one scheduler per GPU rank into separate processes over ZMQ, which exists to serve tensor-parallel ranks. Without TP that structure leaves only IPC overhead, so this engine collapses to one process: a uvicorn/FastAPI event loop for HTTP and SSE, an engine thread running the `step()` loop (schedule → forward → sample → postprocess), and a tokenizer thread pool. The known cost is GIL contention between HTTP, tokenization and Python scheduling. The tokenizer interface is replaceable by a subprocess if profiling shows it starving the engine loop; this is expected to matter most on hosts with weak single-thread CPUs.
