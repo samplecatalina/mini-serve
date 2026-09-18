@@ -1,0 +1,4 @@
+# Only pyproject.toml and uv.lock are copied into the image; source is bind-mounted.
+*
+!pyproject.toml
+!uv.lock

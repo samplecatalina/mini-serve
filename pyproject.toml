@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miniserve"
+version = "0.0.1"
+description = "A single-GPU LLM inference engine: continuous batching, paged KV cache, radix prefix cache."
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "MIT" }
+# Exact pins. The first four match the reference sglang 0.5.10 environment used
+# for head-to-head comparisons; changing any of them changes the reference
+# outputs of the HF consistency test and the fairness of the benchmark.
+dependencies = [
+    "torch==2.9.1",
+    "triton==3.5.1",
+    "flashinfer-python==0.6.7.post3",
+    "transformers==5.3.0",
+    "safetensors",
+    "huggingface-hub",
+    "numpy",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.setuptools.packages.find]
+include = ["miniserve*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+markers = [
+    "gpu: requires a CUDA device",
+    "slow: takes more than a few seconds (JIT compilation, model download)",
+]
