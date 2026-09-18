@@ -14,26 +14,12 @@ import torch
 from miniserve.model.generate import greedy_generate
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from miniserve.model.weights import load_config, load_weights
+from prompts import PROMPTS
+from prompts import encode as _encode
 
 pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 SEED = 0
-
-_LONG_TEXT = (
-    "The history of computing is often told as a sequence of machines, but it is equally a history of ideas "
-    "about representation: how numbers, text, images and eventually programs themselves can be encoded as "
-    "patterns of symbols and manipulated by rules. "
-) * 12
-
-PROMPTS = {
-    "short_en": ("The capital of France is", 128),
-    "long_en": (_LONG_TEXT + "\nSummarize the passage above in three sentences:", 128),
-    "code": ("def quicksort(arr):\n    \"\"\"Sort a list of integers.\"\"\"\n", 128),
-    "zh": ("请用三句话介绍一下长城的历史。", 128),
-    "chat": ([{"role": "user", "content": "Explain what a KV cache is in one paragraph."}], 128),
-    "long_gen": ("Write a short story about a lighthouse keeper who finds a message in a bottle.", 512),
-}
-
 
 @pytest.fixture(scope="module")
 def tokenizer(qwen3_path):
@@ -60,14 +46,6 @@ def stop_ids(hf_model) -> list[int]:
 def model(qwen3_path):
     torch.manual_seed(SEED)
     return Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(qwen3_path)), load_weights(qwen3_path))
-
-
-def _encode(tokenizer, prompt) -> list[int]:
-    if isinstance(prompt, list):
-        return tokenizer.apply_chat_template(
-            prompt, add_generation_prompt=True, enable_thinking=False, tokenize=True, return_dict=False
-        )
-    return tokenizer(prompt).input_ids
 
 
 @torch.inference_mode()

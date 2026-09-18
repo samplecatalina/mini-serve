@@ -108,7 +108,8 @@ class Qwen3ForCausalLM:
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cache: ContiguousKVCache,
+        caches: list[ContiguousKVCache],
+        seq_lens: list[int],
     ) -> torch.Tensor:
         cfg, w, p = self.cfg, self.w, f"model.layers.{i}.self_attn."
         t = x.shape[0]
@@ -122,18 +123,23 @@ class Qwen3ForCausalLM:
         q = q * c + _rotate_half(q) * s
         k = k * c + _rotate_half(k) * s
 
-        k_all, v_all = cache.write(i, k, v)
-        # SDPA expects [batch, heads, seq, head_dim].
-        out = F.scaled_dot_product_attention(
-            q.transpose(0, 1).unsqueeze(0),
-            k_all.transpose(0, 1).unsqueeze(0),
-            v_all.transpose(0, 1).unsqueeze(0),
-            is_causal=t > 1,
-            scale=cfg.head_dim**-0.5,
-            enable_gqa=True,
-        )
-        out = out.squeeze(0).transpose(0, 1).reshape(t, cfg.num_heads * cfg.head_dim)
-        return F.linear(out, w[p + "o_proj.weight"])
+        # Projections run over all tokens of the batch at once; attention runs
+        # per sequence, each against its own contiguous cache.
+        outs = []
+        for cache, qs, ks, vs in zip(caches, q.split(seq_lens), k.split(seq_lens), v.split(seq_lens)):
+            k_all, v_all = cache.write(i, ks, vs)
+            # SDPA expects [batch, heads, seq, head_dim].
+            o = F.scaled_dot_product_attention(
+                qs.transpose(0, 1).unsqueeze(0),
+                k_all.transpose(0, 1).unsqueeze(0),
+                v_all.transpose(0, 1).unsqueeze(0),
+                is_causal=qs.shape[0] > 1,
+                scale=cfg.head_dim**-0.5,
+                enable_gqa=True,
+            )
+            outs.append(o.squeeze(0).transpose(0, 1))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs)
+        return F.linear(out.reshape(t, cfg.num_heads * cfg.head_dim), w[p + "o_proj.weight"])
 
     def _mlp(self, i: int, x: torch.Tensor) -> torch.Tensor:
         w, p = self.w, f"model.layers.{i}.mlp."
@@ -150,24 +156,60 @@ class Qwen3ForCausalLM:
     ) -> torch.Tensor:
         """Run ``input_ids`` (the next tokens of the sequence in ``cache``).
 
-        ``is_causal`` for multi-token calls assumes the cache was empty
-        (a prefill); extending a non-empty cache by several tokens needs a
-        proper offset mask and is not supported by this reference path.
         Returns logits ``[vocab]`` for the last token, or ``[T, vocab]``.
         """
+        h = self._hidden(input_ids, positions, [cache], [input_ids.shape[0]])
+        h = _rms_norm(h if all_logits else h[-1:], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
+        logits = F.linear(h, self.w["lm_head.weight"])
+        return logits if all_logits else logits[0]
+
+    @torch.inference_mode()
+    def forward_batch(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        caches: list[ContiguousKVCache],
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        """Run several sequences in one pass.
+
+        ``input_ids`` and ``positions`` hold the new tokens of all sequences
+        concatenated; sequence ``b`` contributes ``seq_lens[b]`` tokens and
+        extends ``caches[b]``. Returns logits ``[len(caches), vocab]`` for the
+        last token of each sequence. With a single sequence this runs exactly
+        the same operations as :meth:`forward`.
+        """
+        h = self._hidden(input_ids, positions, caches, seq_lens)
+        last = torch.tensor(seq_lens, device=h.device).cumsum(0) - 1
+        h = _rms_norm(h[last], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
+        return F.linear(h, self.w["lm_head.weight"])
+
+    def _hidden(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        caches: list[ContiguousKVCache],
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        """Decoder stack; returns final hidden states ``[num_tokens, hidden]`` before the last norm.
+
+        ``is_causal`` for multi-token sequences assumes their cache was empty
+        (a prefill); extending a non-empty cache by several tokens needs a
+        proper offset mask and is not supported by this reference path.
+        """
         cfg, w = self.cfg, self.w
-        t = input_ids.shape[0]
-        if t > 1 and cache.length != 0:
+        if len(caches) != len(seq_lens) or sum(seq_lens) != input_ids.shape[0]:
+            raise ValueError(f"seq_lens {seq_lens} do not match {input_ids.shape[0]} tokens / {len(caches)} caches")
+        if any(n > 1 and c.length != 0 for c, n in zip(caches, seq_lens)):
             raise NotImplementedError("multi-token forward on a non-empty cache")
         cos, sin = self._rope(positions)
 
         h = F.embedding(input_ids, w["model.embed_tokens.weight"])
         for i in range(cfg.num_layers):
             p = f"model.layers.{i}."
-            h = h + self._attention(i, _rms_norm(h, w[p + "input_layernorm.weight"], cfg.rms_norm_eps), cos, sin, cache)
+            x = _rms_norm(h, w[p + "input_layernorm.weight"], cfg.rms_norm_eps)
+            h = h + self._attention(i, x, cos, sin, caches, seq_lens)
             h = h + self._mlp(i, _rms_norm(h, w[p + "post_attention_layernorm.weight"], cfg.rms_norm_eps))
-        cache.length += t
-
-        h = _rms_norm(h if all_logits else h[-1:], w["model.norm.weight"], cfg.rms_norm_eps)
-        logits = F.linear(h, w["lm_head.weight"])
-        return logits if all_logits else logits[0]
+        for cache, n in zip(caches, seq_lens):
+            cache.length += n
+        return h
