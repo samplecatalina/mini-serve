@@ -1315,6 +1315,27 @@ def test_launch_does_not_wait_for_the_device(model, monkeypatch):
     _assert_no_leak(eng)
 
 
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_decode_graph_with_shared_blocks_beyond_pool_size(model):
+    """With a prefix cache, block tables of a decode batch list shared blocks once per sequence,
+    so the batch's page indices can outnumber the pool's blocks: 24 sequences sharing a
+    512-token prefix (32 blocks) in a 1024-token pool (64 blocks) list about 800 pages. The
+    graph path must take them (a buffer sized to the pool once overflowed here)."""
+    eng = _engine(model, attention="paged", kv_pool_tokens=1024, max_running=32)
+    prefix = list(range(1000, 1512))
+    replays = []
+    run = eng.runner.graphs.run
+    eng.runner.graphs.run = lambda *a, **k: replays.append(len(a[3])) or run(*a, **k)
+    reqs = [eng.add_request(prefix + [7, k], SamplingParams(8)) for k in range(24)]
+    while eng.has_unfinished:
+        eng.step()
+    pages = max(replays)
+    assert pages >= 16 and all(r.state is RequestState.FINISHED and len(r.output_ids) == 8 for r in reqs)
+    print(f"\nlargest graph batch {pages} sequences; pool {eng.runner.allocator.num_blocks} blocks")
+    _assert_no_leak(eng)
+
+
 @pytest.fixture(scope="module")
 def workload64(tokenizer, model):
     """64 distinct requests mixing the anchor prompts (about 10 to 570 tokens) with output limits of 8 to 64.

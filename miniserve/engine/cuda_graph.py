@@ -105,7 +105,9 @@ class DecodeGraphs:
         self._inputs = torch.zeros(3, gmax, dtype=torch.long, device=dev)
         i32 = dict(dtype=torch.int32, device=dev)
         self._indptr = torch.zeros(gmax + 1, **i32)
-        self._indices = torch.zeros(pool.num_blocks + gmax, **i32)
+        # Page indices of a whole batch. With prefix caching several sequences list the same
+        # block, so the total is bounded by rows x blocks per sequence, not by the pool size.
+        self._indices = torch.zeros(gmax * pool.num_blocks, **i32)
         self._last = torch.zeros(gmax, **i32)
         self._plan_args = dict(
             num_qo_heads=num_heads,
