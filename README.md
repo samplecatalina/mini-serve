@@ -20,7 +20,7 @@ Engine-level measurements on an RTX 4060 Laptop GPU (Qwen3-0.6B, BF16, 32k-token
 
 CUDA Graph memory: 7 graphs (batch sizes 1, 2, 4, …, 64) share one memory pool of about 0.1 GB (107,355,648 bytes in `m3_1_cuda_graph` runs, captured in 0.45 s), plus one 1.75 MiB KV block for padding rows; the KV pool is sized before capture and the graphs use the memory it leaves free.
 
-Why the numbers look the way they do (shared blocks served from L2 in decode; larger chunks worsening the ITL tail; per-kernel submission cost that a graph removes on the GPU side as well as the CPU side) is in the optimization log.
+Why the numbers look the way they do (shared blocks served from L2 in decode; larger chunks worsening the ITL tail; kernel submission time that a decode graph removes) is in the optimization log.
 
 ## Development environment
 
