@@ -32,8 +32,10 @@ class Engine:
         kv_pool_tokens: int | None = None,
         seed: int = 0,
         runner: ModelRunner | None = None,
+        radix: bool = True,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
+        ``radix``: reuse cached KV of shared prefixes (paged attention only).
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -43,15 +45,11 @@ class Engine:
                 kv_pool_tokens=kv_pool_tokens,
                 max_prefill_tokens=max_prefill_tokens,
                 max_running=max_running,
+                radix=radix,
             )
         self.runner = runner
-        # With a paged pool the scheduler budgets KV blocks and preempts through the runner.
-        self.scheduler = Scheduler(
-            max_running,
-            max_prefill_tokens,
-            allocator=runner.allocator,
-            release=runner.release if runner.allocator is not None else None,
-        )
+        # With a paged pool the scheduler budgets KV blocks (and acquires cached prefixes) through it.
+        self.scheduler = Scheduler(max_running, max_prefill_tokens, kv=runner.kv)
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
         self._seeds = random.Random(seed)
@@ -81,7 +79,8 @@ class Engine:
         batch = self.scheduler.schedule()
         if batch is None:
             return None
-        if batch.phase is Phase.PREFILL:
+        prefill = batch.phase is Phase.PREFILL
+        if prefill and self.runner.kv is None:
             for r in batch.requests:
                 self.runner.allocate(r)
         logits = self.runner.forward(batch)
@@ -95,6 +94,8 @@ class Engine:
                 self._retire(r)
             elif r.state is RequestState.PREFILL:
                 r.transition(RequestState.DECODE)
+                if self.runner.kv is not None:
+                    self.runner.kv.commit(r)  # later requests with this prefix can hit now
         return batch
 
     @staticmethod

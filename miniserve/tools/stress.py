@@ -77,7 +77,8 @@ def main() -> int:
         preemptions=eng.scheduler.num_preemptions,
         preempted_requests=sum(r.num_preemptions > 0 for r in reqs),
         all_finished=all(r.state is RequestState.FINISHED for r in reqs),
-        blocks_returned=alloc is None or alloc.num_free == alloc.num_blocks,
+        blocks_returned=alloc is None or eng.runner.kv.num_idle_blocks() == alloc.num_blocks,
+        prefix_cache=dict(eng.scheduler.stats),
     )
     print(json.dumps(report, indent=2))
     return 0 if report["all_finished"] and report["blocks_returned"] else 1

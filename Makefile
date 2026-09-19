@@ -16,8 +16,16 @@ RUN ?= $(DOCKER_RUN) $(IMAGE)
 endif
 
 PYTEST_ARGS ?=
+BENCH_ARGS  ?=
+# Power scheme that counts as high performance for the benchmark preflight.
+# The development laptop uses a vendor scheme; elsewhere Windows' own
+# "High performance" GUID is the default of bench/host_power.sh.
+HIGH_PERF_SCHEME ?= 52521609-efc9-4268-b9ba-67dea73f18b2
+# Nsight Systems on the host, mounted read-only into the container for profiling.
+NSYS_HOST   ?= /opt/nvidia/nsight-systems/2026.1.3
+NSYS_OUT    ?= profiling/rtx4060-laptop/offline
 
-.PHONY: help image lock shell env-check weights test bench profile
+.PHONY: help image lock shell env-check weights test bench profile bench-offline profile-offline
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -26,6 +34,8 @@ help:
 	@echo "env-check  verify toolchain, pinned versions, GPU, JIT paths and caches"
 	@echo "weights    download the pinned Qwen3-0.6B snapshot into the cache"
 	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests)"
+	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
+	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench      not implemented yet"
 	@echo "profile    not implemented yet"
 
@@ -46,6 +56,18 @@ weights:
 
 test:
 	$(RUN) python -m pytest $(PYTEST_ARGS)
+
+bench-offline:
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
+		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		$(IMAGE) python -m bench.offline $(BENCH_ARGS)
+
+profile-offline:
+	mkdir -p $(dir $(NSYS_OUT))
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NSYS_HOST):/opt/nsys:ro \
+		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		$(IMAGE) /opt/nsys/target-linux-x64/nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false \
+		-o $(NSYS_OUT) -f true python -m bench.offline $(BENCH_ARGS)
 
 bench profile:
 	@echo "make $@: not implemented yet" >&2; exit 1

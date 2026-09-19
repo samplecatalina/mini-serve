@@ -3,7 +3,9 @@
 Two KV storage / attention modes:
 
 - ``paged`` (default): a preallocated KV pool of fixed-size blocks, one
-  ``BlockTable`` per request, FlashInfer batch attention.
+  ``BlockTable`` per request, FlashInfer batch attention, and optionally a
+  radix prefix cache over the blocks (``KVCacheManager``). A prefill then
+  runs only the tokens after the cached prefix.
 - ``contiguous``: one contiguous cache per request sized ``prompt +
   max_new_tokens``, PyTorch SDPA per request. This is the reference path.
 """
@@ -14,8 +16,9 @@ import gc
 
 import torch
 
-from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
+from miniserve.cache.block_allocator import BlockAllocator
 from miniserve.cache.block_table import BlockTable
+from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.request import Request
 from miniserve.engine.sampler import Sampler, SamplingArgs
@@ -36,11 +39,13 @@ class ModelRunner:
         max_prefill_tokens: int = 8192,
         kv_mem_fraction: float = 0.9,
         max_running: int = 64,
+        radix: bool = True,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
         by sampling ``max_running`` rows (``kv_mem_fraction`` of it);
-        ``kv_pool_tokens`` sets an exact size and must fit in that memory."""
+        ``kv_pool_tokens`` sets an exact size and must fit in that memory.
+        ``radix``: keep a prefix cache over the pool (paged mode only)."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
@@ -48,6 +53,7 @@ class ModelRunner:
         self.attention = attention
         self.sampler = Sampler(model.device, model.cfg.vocab_size)
         self.allocator: BlockAllocator | None = None
+        self.kv: KVCacheManager | None = None
         if attention == "paged":
             cfg = model.cfg
 
@@ -69,6 +75,7 @@ class ModelRunner:
                 num_blocks = kv_pool_tokens // block_size
             self.kv_profile["num_blocks"] = num_blocks
             self.allocator = BlockAllocator(num_blocks, block_size)
+            self.kv = KVCacheManager(self.allocator, radix)
             self.pool = pool(num_blocks)
             self.flashinfer.pool = self.pool
 
@@ -123,13 +130,14 @@ class ModelRunner:
         )
 
     def allocate(self, req: Request) -> None:
+        """Contiguous mode only: in paged mode the scheduler acquires KV at admission."""
         if req.cache is not None:
             raise RuntimeError(f"request {req.rid} already holds a cache")
-        req.cache = BlockTable(self.allocator) if self.attention == "paged" else self.model.new_cache(req.max_len)
+        req.cache = self.model.new_cache(req.max_len)
 
     def release(self, req: Request) -> None:
-        if isinstance(req.cache, BlockTable):
-            req.cache.release()
+        if self.kv is not None:
+            self.kv.release(req)
         req.cache = None
 
     def sample(self, batch: Batch, logits: torch.Tensor) -> torch.Tensor:
@@ -142,9 +150,9 @@ class ModelRunner:
         ids: list[int] = []
         pos: list[int] = []
         for r in batch.requests:
-            if prefill:  # prompt + output: a preempted request resumes where it stopped
-                ids += r.prompt_ids + r.output_ids
-                pos += range(r.seq_len)
+            if prefill:  # prompt + output (a preempted request resumes), after the cached prefix
+                ids += (r.prompt_ids + r.output_ids)[r.num_cached_tokens :]
+                pos += range(r.num_cached_tokens, r.seq_len)
             else:
                 ids.append(r.output_ids[-1])
                 pos.append(len(r.prompt_ids) + len(r.output_ids) - 1)
@@ -165,9 +173,9 @@ class ModelRunner:
         )
 
     def _reserve(self, tables: list[BlockTable], seq_lens: list[int]) -> None:
-        """Extend every table by its new tokens, or change nothing if the pool is short."""
+        """Extend every table by its new tokens. If the pool is short even after evicting
+        from the prefix cache, raise ``OutOfBlocks`` with the tables unchanged."""
         need = sum(t.blocks_needed(n) for t, n in zip(tables, seq_lens))
-        if not self.allocator.can_allocate(need):
-            raise OutOfBlocks(f"batch needs {need} KV blocks, {self.allocator.num_free} free")
+        self.kv.reserve(need)  # evicts from the prefix cache if the free pool is short
         for t, n in zip(tables, seq_lens):
             t.append_tokens(n)

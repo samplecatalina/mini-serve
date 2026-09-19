@@ -79,6 +79,10 @@ class Request:
     # KV storage (a block table, or a contiguous cache on the reference path);
     # owned by the model runner between admission and release.
     cache: BlockTable | ContiguousKVCache | None = None
+    # Prefix-cache bookkeeping, set at admission: the locked tree node, and how
+    # many leading tokens of this prefill come from the cache.
+    cache_node: object = None
+    num_cached_tokens: int = 0
     num_preemptions: int = 0
     # Seed of the sampling noise; fixed when the request is submitted.
     seed: int = 0

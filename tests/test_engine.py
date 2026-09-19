@@ -27,6 +27,7 @@ import torch
 
 from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
 from miniserve.cache.block_table import BlockTable
+from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import InvalidTransition, Request, RequestState, SamplingParams
@@ -198,21 +199,16 @@ def test_retire_waiting_and_idle():
 # --------------------------------------------------------------------------- scheduler: KV budget and preemption
 
 
-def _paged_scheduler(num_blocks: int, block_size: int = 4, **kw) -> tuple[Scheduler, BlockAllocator]:
+def _paged_scheduler(num_blocks: int, block_size: int = 4, radix: bool = False, **kw) -> tuple[Scheduler, BlockAllocator]:
     a = BlockAllocator(num_blocks, block_size)
-
-    def release(r):
-        r.cache.release()
-        r.cache = None
-
-    return Scheduler(allocator=a, release=release, **kw), a
+    return Scheduler(kv=KVCacheManager(a, radix), **kw), a
 
 
 def _run_batch(batch, allocator):
+    """Stand-in for the engine step: extend each block table, emit token 0, commit prefills."""
     if batch.phase is Phase.PREFILL:
         for r in batch.requests:
-            r.cache = BlockTable(allocator)
-            r.cache.append_tokens(r.seq_len)
+            r.cache.append_tokens(r.seq_len - r.num_cached_tokens)
     else:
         for r in batch.requests:
             r.cache.append_tokens(1)
@@ -284,9 +280,41 @@ def test_request_larger_than_pool_rejected():
     s.add(_req(1, 10, 2))  # 12 fits exactly
 
 
-def test_budget_needs_release_callback():
-    with pytest.raises(ValueError):
-        Scheduler(allocator=BlockAllocator(4, 4))
+def test_abandoned_admission_leaves_no_trace():
+    """A request refused after its prefix lookup gives the lookup back: no table, no lock, no stats."""
+    s, a = _paged_scheduler(3, radix=True)
+    x = _req(0, 4, 8)
+    s.add(x)
+    _run_batch(s.schedule(), a)  # x: 4 tokens in 1 block (2 reserved), DECODE
+    s.kv.commit(x)  # x's full block enters the tree, locked by x
+    y = Request(1, x.prompt_ids + [7, 7, 7, 7], SamplingParams(4))  # shares x's first block
+    s.add(y)
+    batch = s.schedule()
+    # y hits 1 block, needs ceil(9 / 4) - 1 = 2 more; available 2 free - 1 for x's next token = 1
+    assert batch.phase is Phase.DECODE and batch.requests == [x]
+    assert y.cache is None and y.cache_node is None and y.num_cached_tokens == 0 and list(s.waiting) == [y]
+    assert s.stats == dict(first_tokens=4, first_cached=0, re_tokens=0, re_cached=0)
+    assert x.cache_node.lock == 1  # y's lock was given back
+    s.kv.check_invariants()
+
+
+def test_admission_counts_cached_prefix():
+    """A hit shrinks both the block need and the prefill tokens: y fits only because of it."""
+    s, a = _paged_scheduler(4, radix=True)
+    x = _req(0, 8, 4)  # 8 tokens = 2 full blocks
+    s.add(x)
+    _run_batch(s.schedule(), a)
+    s.kv.commit(x)  # x holds 2 full blocks, both now in the tree; 2 free
+    y = Request(1, x.prompt_ids + [9], SamplingParams(2))  # 9 tokens: 2 blocks cached, 1 token to compute
+    s.add(y)
+    # y needs ceil(10 / 4) - 2 = 1 block; available: 2 free - 1 for x's next token = 1.
+    # Without the hit it would need 3 and not fit.
+    batch = s.schedule()
+    assert batch.phase is Phase.PREFILL and batch.requests == [y]
+    assert y.num_cached_tokens == 8 and batch.seq_lens == [1]
+    assert y.cache.blocks[:2] == x.cache.blocks[:2]
+    assert s.stats["first_cached"] == 8
+    s.kv.check_invariants()
 
 
 # --------------------------------------------------------------------------- CPU simulation with a toy model
@@ -354,6 +382,7 @@ def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     runner.device = torch.device("cpu")
     runner.attention = "paged"
     runner.allocator = BlockAllocator(num_blocks, block_size)
+    runner.kv = KVCacheManager(runner.allocator, kw.pop("radix", True))
     runner.sampler = Sampler("cpu", TOY_VOCAB)
     return Engine(None, runner=runner, **kw)
 
@@ -382,17 +411,66 @@ def test_simulated_load_under_kv_pressure(seed, num_blocks):
         for prompt, params in arrivals.get(step, []):
             reqs.append(eng.add_request(prompt, params))
         eng.step()
-        eng.runner.allocator.check_invariants()
+        eng.runner.kv.check_invariants()
         step += 1
         assert step < 20_000, "no progress"
     for r in reqs:
         assert r.state is RequestState.FINISHED
         assert r.output_ids == _toy_generate(r.prompt_ids, r.params, r.seed), f"request {r.rid} {r.params}"
-    a = eng.runner.allocator
-    assert a.num_free == a.num_blocks
+    _assert_no_leak(eng)
     if num_blocks == 8:
         assert eng.scheduler.num_preemptions > 0, "the small pool should force preemption"
     print(f"\nseed {seed}, {num_blocks} blocks: {step} steps, {eng.scheduler.num_preemptions} preemptions")
+
+
+@pytest.mark.parametrize("radix", [True, False])
+@pytest.mark.parametrize("num_blocks", [12, 24, 96])
+@pytest.mark.parametrize("seed", range(8))
+def test_simulated_shared_prefixes(seed, num_blocks, radix):
+    """Requests built from a few shared prefixes, in a pool small enough to preempt and evict.
+
+    The toy model reads every sequence's history back from the KV store through
+    its block table and checks each (token, position), so a cached block holding
+    the wrong tokens, or one evicted and overwritten while still in use, changes
+    the output. Every output must equal the request run alone, and the tree and
+    allocator invariants must hold after every step."""
+    import random
+
+    rng = random.Random(seed)
+    block_size = 4
+    eng = _toy_engine(num_blocks, block_size, max_running=8, max_prefill_tokens=40, radix=radix)
+    cap = num_blocks * block_size
+    prefixes = [[rng.randrange(1, TOY_VOCAB) for _ in range(rng.randint(4, 17))] for _ in range(3)]
+    arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
+    for _ in range(30):
+        prompt = rng.choice(prefixes) + [rng.randrange(1, TOY_VOCAB) for _ in range(rng.randint(0, 6))]
+        if rng.random() < 0.2:
+            prompt = list(rng.choice(prefixes))  # an exact repeat
+        temperature = rng.choice([0.0, 4.0])
+        max_new = rng.randint(1, min(24, cap - len(prompt)))
+        params = SamplingParams(max_new, frozenset({TOY_STOP}), temperature, 1.0, rng.randrange(2**32))
+        arrivals.setdefault(rng.randrange(40), []).append((prompt, params))
+    reqs, step = [], 0
+    while eng.has_unfinished or step < 40:
+        for prompt, params in arrivals.get(step, []):
+            reqs.append(eng.add_request(prompt, params))
+        eng.step()
+        eng.runner.kv.check_invariants()
+        step += 1
+        assert step < 20_000, "no progress"
+    for r in reqs:
+        assert r.state is RequestState.FINISHED
+        assert r.output_ids == _toy_generate(r.prompt_ids, r.params, r.seed), f"request {r.rid} {r.params}"
+    st = eng.scheduler.stats
+    if radix:
+        assert st["first_cached"] > 0, st
+        if eng.scheduler.num_preemptions:
+            assert st["re_cached"] > 0, st  # readmitted requests find their own blocks
+    else:
+        assert st["first_cached"] == st["re_cached"] == 0
+    _assert_no_leak(eng)
+    print(f"\nseed {seed}, {num_blocks} blocks, radix {radix}: {step} steps, "
+          f"{eng.scheduler.num_preemptions} preemptions, stats {st}")
 
 
 # --------------------------------------------------------------------------- GPU: correctness anchor
@@ -466,17 +544,22 @@ def _check_margins(name, model, prompt, tokens) -> float:
 
 def _expected_positions(batch) -> list[int]:
     """Positions fed in ``batch``, computed after the step (each request holds one more output token)."""
-    if batch.phase is Phase.PREFILL:  # prompt + the output kept across a preemption
-        return [p for r in batch.requests for p in range(r.seq_len - 1)]
+    if batch.phase is Phase.PREFILL:  # prompt + the output kept across a preemption, after the cached prefix
+        return [p for r in batch.requests for p in range(r.num_cached_tokens, r.seq_len - 1)]
     # the token just fed was the previous last output
     return [r.seq_len - 2 for r in batch.requests]
 
 
 def _assert_no_leak(eng):
-    if eng.runner.attention == "paged":
-        a = eng.runner.allocator
-        assert a.num_free == a.num_blocks
-        a.check_invariants()
+    """Idle: no request holds a block; after clearing the prefix cache every block is free."""
+    kv = eng.runner.kv
+    if kv is not None:
+        kv.check_invariants()
+        assert kv.num_idle_blocks() == kv.allocator.num_blocks
+        if kv.tree is not None:
+            assert kv.tree.num_evictable == kv.tree.num_cached_blocks  # nothing locked
+            kv.tree.clear()
+        assert kv.allocator.num_free == kv.allocator.num_blocks
 
 
 def _run(eng, reference, schedule):
@@ -540,7 +623,7 @@ def test_paged_prefill_logits_close(model, reference):
     reqs = [Request(i, p, SamplingParams(1)) for i, p in enumerate(prompts)]
     for r in reqs:
         r.transition(RequestState.PREFILL)
-        eng.runner.allocate(r)
+        eng.runner.kv.acquire(r)
     paged = eng.runner.forward(Batch(Phase.PREFILL, reqs)).float()
     dev = model.device
     alone = torch.stack(
@@ -623,7 +706,7 @@ def test_paged_pool_exhaustion_changes_nothing(model, reference):
     # Below the scheduler, the runner still refuses a batch that does not fit, changing nothing.
     r = Request(0, ids, SamplingParams(4))
     r.transition(RequestState.PREFILL)
-    eng.runner.allocate(r)
+    eng.runner.kv.acquire(r)
     with pytest.raises(OutOfBlocks):
         eng.runner.forward(Batch(Phase.PREFILL, [r]))
     assert r.cache.blocks == [] and eng.runner.allocator.num_free == 8
@@ -685,6 +768,55 @@ def test_positions_contract(attention, model, reference, monkeypatch):
         assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
         step += 1
     assert len(seen) == step
+    _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_shared_prefix_anchor(model, tokenizer, reference, monkeypatch):
+    """Requests that reuse cached KV pass the anchor, with exact positions.
+
+    A runs first. While A decodes, B (the same prompt) and C (A's first 512
+    tokens plus a different ending) arrive and hit A's committed prompt blocks.
+    After A finishes, E repeats the prompt and hits blocks no request holds."""
+    from miniserve.model.generate import greedy_generate
+
+    base, n, ref_a, gaps_a = reference["long_en"]
+    tail = tokenizer(" In one word, the topic of the passage is").input_ids
+    prompt_c = base[:512] + tail
+    gaps_c: list[float] = []
+    ref_c = greedy_generate(model, prompt_c, 64, stop_ids=STOP_IDS, top2_gaps=gaps_c)
+    refs = {"A": (base, n, ref_a, gaps_a), "B": (base, n, ref_a, gaps_a), "C": (prompt_c, 64, ref_c, gaps_c)}
+    refs["E"] = refs["A"]
+
+    seen = []
+    inner = model.forward_with
+
+    def spy(input_ids, positions, attn, seq_lens):
+        seen.append(positions.tolist())
+        return inner(input_ids, positions, attn, seq_lens)
+
+    eng = _engine(model, attention="paged")
+    monkeypatch.setattr(model, "forward_with", spy)
+    reqs, step = {}, 0
+    reqs["A"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
+    while eng.has_unfinished or "E" not in reqs:
+        if step == 3:
+            for k in "BC":
+                reqs[k] = eng.add_request(refs[k][0], SamplingParams(refs[k][1], STOP_IDS))
+        if not eng.has_unfinished and "E" not in reqs:
+            reqs["E"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
+        batch = eng.step()
+        assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
+        if batch.phase is Phase.PREFILL:
+            cached = {k: r.num_cached_tokens for k, r in reqs.items() if r in batch.requests}
+            print(f"step {step}: prefill cached tokens {cached}")
+        eng.runner.kv.check_invariants()
+        step += 1
+    full = (len(base) - 1) // 16 * 16  # every whole block but the one holding the last prompt token
+    assert [reqs[k].num_cached_tokens for k in "ABCE"] == [0, full, 512, full]
+    assert eng.scheduler.stats["first_cached"] == 2 * full + 512
+    _check_all("shared prefix", model, refs, reqs)
     _assert_no_leak(eng)
 
 
@@ -778,15 +910,16 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
         batch = eng.step()
         if batch is not None:
             assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
-        eng.runner.allocator.check_invariants()
+        eng.runner.kv.check_invariants()
         step += 1
         assert step < 20_000, "no progress"
     resumed = sum(r.num_preemptions > 0 for r in reqs.values())
     print(
         f"\n[{arrival}, pool {pool_tokens} tokens] {step} steps, "
-        f"{eng.scheduler.num_preemptions} preemptions of {resumed} requests"
+        f"{eng.scheduler.num_preemptions} preemptions of {resumed} requests; prefix cache {eng.scheduler.stats}"
     )
     assert eng.scheduler.num_preemptions > 0, "the pool is too large to exercise preemption"
+    assert eng.scheduler.stats["re_cached"] > 0, "readmitted requests should find their own blocks cached"
     _check_all(f"64 concurrent {arrival}, pool {pool_tokens}", model, workload64, reqs)
     _assert_no_leak(eng)
 

@@ -12,7 +12,8 @@ What must hold:
   requeued after a preemption, over the engine-thread API and over HTTP when
   the client disconnects;
 - serving does not change output: a greedy request over HTTP returns exactly
-  the text of the same request run offline on the same engine.
+  the text of the same request run offline on the same engine, both starting
+  from an empty prefix cache.
 """
 
 from __future__ import annotations
@@ -207,9 +208,10 @@ async def _drain(stream):
 
 async def _assert_idle_and_clean(ae: AsyncEngine):
     def state(eng):
-        a = eng.runner.allocator
-        a.check_invariants()
-        return eng.has_unfinished, len(eng.requests), a.num_free, a.num_blocks
+        kv = eng.runner.kv
+        kv.check_invariants()  # includes: nothing in the prefix cache is locked unless held
+        locked = kv.tree.num_cached_blocks - kv.tree.num_evictable if kv.tree else 0
+        return eng.has_unfinished, len(eng.requests) + locked, kv.num_idle_blocks(), kv.allocator.num_blocks
 
     busy, live, free, total = await ae.call(state)
     assert not busy and live == 0 and free == total, (busy, live, free, total)
@@ -401,9 +403,17 @@ def _on_engine(server, fn):
     return asyncio.run_coroutine_threadsafe(ae.call(fn), ae._loop).result(timeout=300)
 
 
+def _clear_prefix_cache(server):
+    """Start from an empty prefix cache. With KV reuse, a request's computation (and so, at BF16
+    near-ties, its output) depends on what is cached; comparisons need the same cache state."""
+    _on_engine(server, lambda eng: eng.runner.kv.set_radix(eng.runner.kv.radix))
+
+
 def _offline(server, prompt_ids, max_tokens):
-    """The same request run alone on the same engine, submitted directly (the server must be idle)."""
+    """The same request run alone on the same engine from an empty prefix cache, submitted directly
+    (the server must be idle)."""
     params = SamplingParams(max_tokens, QWEN_STOP)
+    _clear_prefix_cache(server)
     return _on_engine(server, lambda eng: eng.generate([prompt_ids], params)[0])
 
 
@@ -425,6 +435,7 @@ def test_http_completion_matches_offline(server):
 
     url, _, tok, _ = server
     prompt = "The capital of France is"
+    _clear_prefix_cache(server)
     r = httpx.post(f"{url}/v1/completions", json=dict(prompt=prompt, max_tokens=64, temperature=0), timeout=120)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -450,6 +461,7 @@ def test_http_chat_stream_matches_offline(server, content):
         stream_options={"include_usage": True},
         chat_template_kwargs={"enable_thinking": False},
     )
+    _clear_prefix_cache(server)
     with httpx.stream("POST", f"{url}/v1/chat/completions", json=req, timeout=120) as r:
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
         events = list(_sse_events(r.iter_lines()))
@@ -559,9 +571,10 @@ def test_http_disconnects_return_all_blocks(server):
     assert "ended" not in outcomes and all(o in ("cut", "done") for o in outcomes), outcomes
 
     def idle_state(eng):
-        a = eng.runner.allocator
-        a.check_invariants()
-        return eng.has_unfinished, len(eng.requests), a.num_free, a.num_blocks, eng.scheduler.num_preemptions
+        kv = eng.runner.kv
+        kv.check_invariants()
+        locked = kv.tree.num_cached_blocks - kv.tree.num_evictable if kv.tree else 0
+        return eng.has_unfinished, len(eng.requests) + locked, kv.num_idle_blocks(), kv.allocator.num_blocks, eng.scheduler.num_preemptions
 
     deadline = time.monotonic() + 120
     while (state := _on_engine(server, idle_state))[0] and time.monotonic() < deadline:
