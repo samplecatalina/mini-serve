@@ -96,6 +96,8 @@ Core types: `Request` (prompt ids, sampling params, state machine WAITING → PR
 | L40S 48 GB (Ada) | Primary benchmark: 256 concurrent sequences fit in the KV pool, ablations, comparison against mini-sglang and sglang. |
 | H100 80 GB (Hopper) | Second data point: larger model, different CPU:GPU ratio, hardware counters. |
 
+The port is a container: the development image is converted to an Apptainer image and copied to the cluster, so both run the same bytes; the code is a checkout of this repository, and every JIT and model cache lives in project storage, outside the home directory. A job's first step asserts all of that (`psc/preflight.sh`), and the image is started with the target GPU's architecture in `TORCH_CUDA_ARCH_LIST` / `FLASHINFER_CUDA_ARCH_LIST`, since attention and Triton kernels are compiled at run time. Correctness across devices is checked per device: the engine against that device's own reference path, which is where the tolerance policy applies. The reference path is not bitwise identical across GPUs (on three of six anchor prompts the 4060 and the L40S pick different tokens at exact BF16 ties, from token 4, 5 and 17), so requiring identical output across devices would report normal numerics as a bug.
+
 L40S and the 4060 share the same SM architecture constants, so code written locally runs on the cluster without architectural adaptation. Their CPU:GPU balance is very different, which is exactly what makes the overlap scheduling ablation informative across platforms.
 
 ## Measurement

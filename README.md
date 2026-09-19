@@ -6,7 +6,7 @@ Work in progress: continuous batching, the paged KV cache, the radix prefix cach
 
 ## Results so far
 
-Engine-level measurements on an RTX 4060 Laptop GPU (Qwen3-0.6B, BF16, 32k-token KV pool; median of 3 runs; rows in `results/rtx4060-laptop/`):
+Engine-level measurements on an RTX 4060 Laptop GPU unless stated otherwise (Qwen3-0.6B, BF16, 32k-token KV pool; median of 3 runs; rows in `results/rtx4060-laptop/`):
 
 | Change | Workload | Result |
 |---|---|---|
@@ -24,6 +24,8 @@ Engine-level measurements on an RTX 4060 Laptop GPU (Qwen3-0.6B, BF16, 32k-token
 | Shortest-job-first vs FCFS | same | mean latency 5.2 vs 8.9 s, short requests 1.9 vs 7.2 s; long-request p99 21.3 vs 22.3 s |
 | Any policy | same, 16k-token KV pool | throughput within 4% of FCFS: the pool holds the queue, order stops mattering |
 | Overlap scheduling (with CUDA Graphs) | 4 req/s, 8 long prompts among 64 | ITL p50 8.55 vs 8.73 ms, ITL p99 27 vs 29 ms; TTFT p50 39 vs 31 ms |
+
+Ported to a cluster L40S with the same container image (byte-identical, built locally and copied over): 32 requests of 1088 tokens with 256 output tokens each run at 2569 output tok/s through the engine and 2832 tok/s through 32 concurrent HTTP streams, against 744 / 738 tok/s on the 4060. Greedy output was checked on each device against that device's reference path; across devices the reference path itself differs at BF16 near-ties (see `docs/design.md`).
 
 CUDA Graph memory: 7 graphs (batch sizes 1, 2, 4, …, 64) share one memory pool of about 0.1 GB (107,355,648 bytes in `m3_1_cuda_graph` runs, captured in 0.45 s), plus one 1.75 MiB KV block for padding rows; the KV pool is sized before capture and the graphs use the memory it leaves free.
 
