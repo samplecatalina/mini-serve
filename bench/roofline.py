@@ -166,7 +166,13 @@ def main() -> int:
     # is the L2's contribution, and it is worth seeing.
     copies = [r for r in rows if r["kernel"] == "copy"]
     best_copy = max(copies, key=lambda r: r["bytes"])
-    best_gemm = max((r for r in rows if r["kernel"] == "gemm"), key=lambda r: r["tflop_s"])
+    # The same rule for the GEMM rate, for the same reason and one more: on a
+    # power-limited card the largest problem is the one that runs long enough to
+    # hit the cap. The fastest size is reported beside it, because the gap between
+    # them is how much of the quoted rate is a burst.
+    gemms = [r for r in rows if r["kernel"] == "gemm"]
+    best_gemm = max(gemms, key=lambda r: r["flops"])
+    burst_gemm = max(gemms, key=lambda r: r["tflop_s"])
 
     os.makedirs(results_dir, exist_ok=True)
     path = f"{results_dir}/{args.out}.csv"
@@ -195,6 +201,7 @@ def main() -> int:
             best=dict(
                 copy_gb_s=best_copy["gb_s"], copy_size=best_copy["size"],
                 gemm_tflop_s=best_gemm["tflop_s"], gemm_n=best_gemm["size"],
+                gemm_burst_tflop_s=burst_gemm["tflop_s"], gemm_burst_n=burst_gemm["size"],
             ),
         ),
     )
@@ -204,8 +211,10 @@ def main() -> int:
         rate = f"{row['gb_s']} GB/s" if row["kernel"] == "copy" else f"{row['tflop_s']} TFLOP/s"
         pct = f"  {row['pct_of_spec']}% of {spec} GB/s spec" if row["pct_of_spec"] != "" else ""
         print(f"  {row['kernel']:5s} {row['size']:>7s}  {row['ms_median']:9.4f} ms  {rate:>16s}{pct}")
-    print(f"\ndenominators: copy {best_copy['gb_s']} GB/s at {best_copy['size']} (the largest, so DRAM bound),"
-          f" BF16 GEMM {best_gemm['tflop_s']} TFLOP/s at n={best_gemm['size']}")
+    print(f"\ndenominators (largest problem of each, the one that runs long enough to be bound by the hardware):"
+          f"\n  copy      {best_copy['gb_s']} GB/s at {best_copy['size']}"
+          f"\n  BF16 GEMM {best_gemm['tflop_s']} TFLOP/s at n={best_gemm['size']}"
+          f"  (fastest size: {burst_gemm['tflop_s']} TFLOP/s at n={burst_gemm['size']})")
     print(json.dumps(gpu_during["sm_mhz"] | {"reasons": gpu_during["clocks_event_reasons"]}))
     return 0
 
