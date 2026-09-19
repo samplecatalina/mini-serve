@@ -27,6 +27,8 @@ HIGH_PERF_SCHEME ?= 52521609-efc9-4268-b9ba-67dea73f18b2
 # Apptainer image of the development image, for the cluster: built by the official
 # apptainer container from a `docker save` of $(IMAGE), so both run the same bytes.
 SIF_DIR     ?= $(HOME)/sif
+SIF_IMAGE   ?= $(IMAGE)
+SIF_NAME    ?= miniserve.sif
 APPTAINER   ?= ghcr.io/apptainer/apptainer@sha256:cfc99015d4af5e4f3f52ce5d5e569ed1e214b4d49a56a2f77b140d5e9cbee595
 # Nsight Systems on the host, mounted read-only into the container for profiling.
 NSYS_HOST   ?= /opt/nvidia/nsight-systems/2026.1.3
@@ -50,7 +52,7 @@ help:
 	@echo "bench-roofline   this GPU's copy bandwidth and BF16 GEMM rate: the denominators"
 	@echo "bench-decode-sharing  decode attention with and without shared KV blocks"
 	@echo "ncu-decode-sharing    one layout of it under Nsight Compute (BENCH_ARGS='--case shared --iters 3')"
-	@echo "sif        convert the development image to an Apptainer image (SIF_DIR) for the cluster"
+	@echo "sif        convert an image to an Apptainer image in SIF_DIR (SIF_IMAGE, SIF_NAME) for the cluster"
 	@echo "bench      the main caliber: start the server, run genai-bench against it (BENCH_ARGS=...)"
 	@echo "serve      run the server in the foreground (ENGINE_ARGS=...)"
 	@echo "profile    not implemented yet"
@@ -104,14 +106,16 @@ ncu-decode-sharing:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NCU_HOST):/opt/ncu:ro $(IMAGE) \
 		/opt/ncu/ncu -k regex:BatchDecode $(NCU_ARGS) -o $(NCU_OUT) -f python -m bench.decode_sharing $(BENCH_ARGS)
 
+# SIF_IMAGE/SIF_NAME pick which image: the engine by default, the load generator with
+#   make sif SIF_IMAGE=miniserve-bench:latest SIF_NAME=miniserve-bench.sif
 sif:
 	mkdir -p $(SIF_DIR)
-	docker save $(IMAGE) -o $(SIF_DIR)/image.tar
+	docker save $(SIF_IMAGE) -o $(SIF_DIR)/image.tar
 	docker run --rm --privileged -v $(SIF_DIR):/work $(APPTAINER) \
-		apptainer build -F /work/miniserve.sif docker-archive:///work/image.tar
+		apptainer build -F /work/$(SIF_NAME) docker-archive:///work/image.tar
 	rm -f $(SIF_DIR)/image.tar
-	docker image inspect $(IMAGE) --format '{{.Id}}' > $(SIF_DIR)/miniserve.sif.docker-id
-	sha256sum $(SIF_DIR)/miniserve.sif | tee $(SIF_DIR)/miniserve.sif.sha256
+	docker image inspect $(SIF_IMAGE) --format '{{.Id}}' > $(SIF_DIR)/$(SIF_NAME).docker-id
+	sha256sum $(SIF_DIR)/$(SIF_NAME) | tee $(SIF_DIR)/$(SIF_NAME).sha256
 
 # The main caliber, in one command: the server in one container, genai-bench in
 # another, talking over the loopback of this host. ENGINE_ARGS configures the
