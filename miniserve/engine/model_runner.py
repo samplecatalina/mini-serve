@@ -8,6 +8,9 @@ Two KV storage / attention modes:
   runs only the tokens after the cached prefix.
 - ``contiguous``: one contiguous cache per request sized ``prompt +
   max_new_tokens``, PyTorch SDPA per request. This is the reference path.
+
+In paged mode, decode steps replay captured CUDA Graphs (``cuda_graph.py``)
+unless disabled or the batch exceeds the largest captured batch size.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from miniserve.cache.block_allocator import BlockAllocator
 from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.cache.kv_pool import KVPool
+from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
 from miniserve.engine.request import Request
 from miniserve.engine.sampler import Sampler, SamplingArgs
 from miniserve.engine.scheduler import Batch, Phase
@@ -50,12 +54,17 @@ class ModelRunner:
         kv_mem_fraction: float = 0.9,
         max_running: int = 64,
         radix: bool = True,
+        cuda_graph: bool = True,
+        cuda_graph_max_bs: int | None = None,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
         by sampling ``max_running`` rows (``kv_mem_fraction`` of it);
         ``kv_pool_tokens`` sets an exact size and must fit in that memory.
-        ``radix``: keep a prefix cache over the pool (paged mode only)."""
+        ``radix``: keep a prefix cache over the pool (paged mode only).
+        ``cuda_graph``: capture decode graphs for batch sizes up to ``cuda_graph_max_bs``
+        (default ``max_running``) after the pool is allocated (paged mode only); they use the
+        memory the pool leaves free. ``use_cuda_graph`` switches them off and on at run time."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
@@ -64,6 +73,8 @@ class ModelRunner:
         self.sampler = Sampler(model.device, model.cfg.vocab_size)
         self.allocator: BlockAllocator | None = None
         self.kv: KVCacheManager | None = None
+        self.graphs: DecodeGraphs | None = None
+        self.use_cuda_graph = False
         if attention == "paged":
             cfg = model.cfg
 
@@ -86,8 +97,25 @@ class ModelRunner:
             self.kv_profile["num_blocks"] = num_blocks
             self.allocator = BlockAllocator(num_blocks, block_size)
             self.kv = KVCacheManager(self.allocator, radix)
-            self.pool = pool(num_blocks)
+            # One block past the allocator's: padding rows of a decode graph write and read it.
+            self.pool = pool(num_blocks + 1)
             self.flashinfer.pool = self.pool
+            if cuda_graph:
+                self.graphs = DecodeGraphs(
+                    model,
+                    self.pool,
+                    dummy_block=num_blocks,
+                    buckets=graph_buckets(cuda_graph_max_bs or max_running),
+                    workspace=self.flashinfer.workspace,
+                    num_heads=cfg.num_heads,
+                    scale=model.attn_scale,
+                )
+                self.use_cuda_graph = True
+                self.kv_profile.update(
+                    graph_buckets=self.graphs.buckets,
+                    graph_bytes=self.graphs.graph_bytes,
+                    graph_capture_s=round(self.graphs.capture_s, 2),
+                )
 
     def _profile(self, make_pool, block_size: int, num_tokens: int, num_rows: int, fraction: float) -> dict[str, int]:
         """Peak activation memory of a ``num_tokens`` prefill followed by sampling ``num_rows``
@@ -172,6 +200,8 @@ class ModelRunner:
                 raise RuntimeError("batch starts disagree with the block tables")
             self._reserve(caches, seq_lens)
             slots = [t.slot(p) for t, n in zip(caches, seq_lens) for p in range(t.num_tokens - n, t.num_tokens)]
+            if not prefill and self.use_cuda_graph and len(caches) <= self.graphs.max_batch:
+                return self.graphs.run(ids, pos, slots, caches)
             self.flashinfer.plan(prefill, seq_lens, caches, slots)
             attn = self.flashinfer
         else:

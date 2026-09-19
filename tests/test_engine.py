@@ -28,6 +28,7 @@ import torch
 from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
 from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_cache import KVCacheManager
+from miniserve.engine.cuda_graph import bucket_for, graph_buckets
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import InvalidTransition, Request, RequestState, SamplingParams
@@ -203,6 +204,19 @@ def test_retire_waiting_and_idle():
 
 
 # --------------------------------------------------------------------------- scheduler: KV budget and preemption
+
+
+def test_graph_buckets():
+    assert graph_buckets(1) == [1]
+    assert graph_buckets(64) == [1, 2, 4, 8, 16, 32, 64]
+    assert graph_buckets(48) == [1, 2, 4, 8, 16, 32, 48]
+    assert graph_buckets(256)[-2:] == [128, 256]
+    b = graph_buckets(48)
+    assert [bucket_for(b, n) for n in (1, 2, 3, 5, 17, 33, 48)] == [1, 2, 4, 8, 32, 48, 48]
+    with pytest.raises(ValueError):
+        bucket_for(b, 49)
+    with pytest.raises(ValueError):
+        graph_buckets(0)
 
 
 def _paged_scheduler(num_blocks: int, block_size: int = 4, radix: bool = False, **kw) -> tuple[Scheduler, BlockAllocator]:
@@ -494,6 +508,7 @@ def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     runner.allocator = BlockAllocator(num_blocks, block_size)
     runner.kv = KVCacheManager(runner.allocator, kw.pop("radix", True))
     runner.sampler = Sampler("cpu", TOY_VOCAB)
+    runner.graphs, runner.use_cuda_graph = None, False
     return Engine(None, runner=runner, **kw)
 
 
@@ -709,6 +724,29 @@ def _assert_no_leak(eng):
         assert kv.allocator.num_free == kv.allocator.num_blocks
 
 
+def _spy_positions(eng, model, monkeypatch) -> list[list[int]]:
+    """Record the positions of every forward pass, eager (``forward_with``) or a decode graph
+    replay (the positions staged into the graph's input buffer)."""
+    seen: list[list[int]] = []
+    inner = model.forward_with
+
+    def spy(input_ids, positions, attn, seq_lens):
+        seen.append(positions.tolist())
+        return inner(input_ids, positions, attn, seq_lens)
+
+    monkeypatch.setattr(model, "forward_with", spy)
+    graphs = eng.runner.graphs
+    if graphs is not None:
+        run = graphs.run
+
+        def graph_spy(ids, pos, slots, tables):
+            seen.append(list(pos))
+            return run(ids, pos, slots, tables)
+
+        monkeypatch.setattr(graphs, "run", graph_spy)
+    return seen
+
+
 def _run(eng, reference, schedule):
     """Drive the engine; ``schedule`` maps step -> prompt names arriving before that step."""
     reqs, step = {}, 0
@@ -817,18 +855,19 @@ def test_batched_prefill_logits_close(model, reference):
 @pytest.mark.gpu
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "attention, chunk",
-    [("contiguous", None), ("paged", None), ("paged", 0), ("paged", 64)],
-    ids=["contiguous", "paged", "paged-nochunk", "paged-chunk64"],
+    "attention, chunk, graph",
+    [("contiguous", None, True), ("paged", None, True), ("paged", None, False), ("paged", 0, True), ("paged", 64, True)],
+    ids=["contiguous", "paged", "paged-eager", "paged-nochunk", "paged-chunk64"],
 )
 @pytest.mark.parametrize("arrival", ["all_at_once", "staggered"])
-def test_concurrent_matches_reference(arrival, attention, chunk, model, reference):
+def test_concurrent_matches_reference(arrival, attention, chunk, graph, model, reference):
     """Mixed concurrent load: prefills of several prompts and decode batches of varying size.
     Paged runs with the default chunk budget (2048: mixed prefill + decode steps), without chunking
-    (prefill-only and decode-only steps), and with 64-token chunks (every long prompt cut)."""
+    (prefill-only and decode-only steps), and with 64-token chunks (every long prompt cut); decode
+    steps replay CUDA Graphs except in ``paged-eager``."""
     names = list(PROMPTS)
     schedule = {0: names} if arrival == "all_at_once" else {0: names[:2], 3: names[2:4], 7: names[4:5], 20: names[5:]}
-    eng = _engine(model, attention=attention, chunked_prefill_size=chunk)
+    eng = _engine(model, attention=attention, chunked_prefill_size=chunk, cuda_graph=graph)
     phases = []
     eng.logits_hook = lambda batch, logits: phases.append(batch.phase)
     reqs, step = _run(eng, reference, schedule)
@@ -943,15 +982,8 @@ def test_positions_contract(attention, model, reference, monkeypatch):
     decode tokens: RoPE is relative, so the model sees what looks like one
     extra gap between prompt and output and keeps producing near-argmax tokens.
     """
-    seen = []
-    inner = model.forward_with
-
-    def spy(input_ids, positions, attn, seq_lens):
-        seen.append(positions.tolist())
-        return inner(input_ids, positions, attn, seq_lens)
-
     eng = _engine(model, attention=attention)  # before the spy: paged construction runs a profiling pass
-    monkeypatch.setattr(model, "forward_with", spy)
+    seen = _spy_positions(eng, model, monkeypatch)
     positions = _Positions()
     names = ["short_en", "code", "zh"]
     for k in names[:2]:
@@ -985,15 +1017,8 @@ def test_shared_prefix_anchor(model, tokenizer, reference, monkeypatch):
     refs = {"A": (base, n, ref_a, gaps_a), "B": (base, n, ref_a, gaps_a), "C": (prompt_c, 64, ref_c, gaps_c)}
     refs["E"] = refs["A"]
 
-    seen = []
-    inner = model.forward_with
-
-    def spy(input_ids, positions, attn, seq_lens):
-        seen.append(positions.tolist())
-        return inner(input_ids, positions, attn, seq_lens)
-
     eng = _engine(model, attention="paged")
-    monkeypatch.setattr(model, "forward_with", spy)
+    seen = _spy_positions(eng, model, monkeypatch)
     positions = _Positions()
     reqs, step = {}, 0
     reqs["A"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
@@ -1027,7 +1052,8 @@ def test_kv_pool_sizing(model):
 
     eng = _engine(model, attention="paged", kv_pool_tokens=1000)  # rounded down to whole blocks
     prof = eng.runner.kv_profile
-    assert eng.runner.allocator.num_blocks == prof["num_blocks"] == 62 and eng.runner.pool.num_blocks == 62
+    # the pool has one more block than the allocator: the decode graphs' padding block
+    assert eng.runner.allocator.num_blocks == prof["num_blocks"] == 62 and eng.runner.pool.num_blocks == 63
     assert prof["peak_activation_bytes"] > 0 and prof["max_blocks"] > 62
     too_many = 2 * prof["max_blocks"] * 16
     del eng
@@ -1039,7 +1065,7 @@ def test_kv_pool_sizing(model):
     prof = eng.runner.kv_profile
     print(f"\nKV pool sized to memory: {prof}")
     assert eng.runner.allocator.num_blocks == prof["num_blocks"] == prof["max_blocks"]
-    assert eng.runner.pool.num_bytes == prof["num_blocks"] * prof["block_bytes"]
+    assert eng.runner.pool.num_bytes == (prof["num_blocks"] + 1) * prof["block_bytes"]
     assert prof["block_bytes"] == 2 * 28 * 16 * 8 * 128 * 2  # Qwen3-0.6B, BF16: 112 KiB per token
     assert prof["num_blocks"] * prof["block_bytes"] <= 0.9 * (prof["free_bytes"] - prof["peak_activation_bytes"])
     # The profiled peak covers the largest sampling step (64 rows, every row sampled with a nucleus).
@@ -1058,6 +1084,50 @@ def test_kv_pool_sizing(model):
     del eng, logits
     gc.collect()
     torch.cuda.empty_cache()
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("lens", [[40], [5, 900, 2500], [17] * 5, [300, 7, 1200, 64, 64, 2000, 33, 900, 450, 12, 1500, 80, 3, 700, 260, 1024, 1025]])
+def test_decode_graph_matches_eager(lens, model):
+    """A decode batch replayed from a CUDA Graph against the same batch run eagerly: logits within
+    the tolerance (the graph's bucket pads the batch, which can change GEMM shapes), and the padding
+    rows write nothing but the dummy block. The graphs were captured with every sequence of length
+    1, so this also checks that planning a batch of long sequences updates what the replay reads."""
+    import random
+
+    rng = random.Random(len(lens))
+    eng = _engine(model, attention="paged", chunked_prefill_size=0)
+    runner = eng.runner
+    reqs = [eng.add_request([rng.randrange(150_000) for _ in range(n)], SamplingParams(3)) for n in lens]
+    while any(r.state is not RequestState.DECODE for r in reqs):
+        eng.step()  # prefill-only steps
+    batch = eng.scheduler.schedule()
+    assert batch.phase is Phase.DECODE and len(batch.requests) == len(lens)
+    tables = [r.cache for r in batch.requests]
+    bs, dummy = runner.pool.block_size, runner.graphs.dummy_block
+    before = runner.pool.buf.cpu()
+    graph_logits = runner.forward(batch).float().clone()
+    after = runner.pool.buf.cpu()
+    # Slots whose K or V changed in any layer, outside the dummy block: exactly the new token of each request.
+    changed = (before != after).flatten(4).any(-1).any(0).any(0)  # [blocks, block_size]
+    del before, after
+    got = {b * bs + o for b, o in changed.nonzero().tolist() if b != dummy}
+    assert got == {t.slot(t.num_tokens - 1) for t in tables}
+    for t in tables:  # rewind the new token and run the same batch eagerly
+        t.num_tokens -= 1
+    runner.use_cuda_graph = False
+    eager_logits = runner.forward(batch).float()
+    runner.use_cuda_graph = True
+    diff = (graph_logits - eager_logits).abs().max().item()
+    top2 = eager_logits.topk(2, dim=-1).values
+    decisive = (top2[:, 0] - top2[:, 1]) > 2 * diff
+    print(f"\n[{len(lens)} rows, bucket {min(g for g in runner.graphs.buckets if g >= len(lens))}] graph vs eager max|d| {diff}")
+    assert diff <= EPS
+    assert torch.equal(graph_logits.argmax(-1)[decisive], eager_logits.argmax(-1)[decisive])
+    for r in reqs:
+        eng.abort(r.rid)
+    _assert_no_leak(eng)
 
 
 @pytest.fixture(scope="module")
@@ -1087,15 +1157,8 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
     total demand. Admission control and preemption must keep every step within the pool (no
     OutOfBlocks, no OOM), the run must finish (no deadlock), preemption must actually happen, and
     every output must pass the correctness anchor, with exact positions at every step."""
-    seen = []
-    inner = model.forward_with
-
-    def spy(input_ids, positions, attn, seq_lens):
-        seen.append(positions.tolist())
-        return inner(input_ids, positions, attn, seq_lens)
-
     eng = _engine(model, attention="paged", kv_pool_tokens=pool_tokens)
-    monkeypatch.setattr(model, "forward_with", spy)
+    seen = _spy_positions(eng, model, monkeypatch)
     positions = _Positions()
     names = sorted(workload64)
     # staggered: bursts of 8 every 5 steps, so requests join while others are mid-decode

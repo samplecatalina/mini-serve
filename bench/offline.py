@@ -113,6 +113,8 @@ class RunResult:
     decode_steps: int = 0
     mixed_steps: int = 0
     decode_batch_sum: int = 0
+    decode_step_s: list[float] = field(default_factory=list)  # wall time of each decode-only step
+    mixed_step_s: list[float] = field(default_factory=list)
     span_s: float = 0.0
 
 
@@ -133,7 +135,9 @@ def run(eng: Engine, w: Workload) -> RunResult:
             time.sleep(max(0.0, w.arrivals[i] - (time.perf_counter() - t0)))
             continue
         torch.cuda.nvtx.range_push("step")
+        t_step = time.perf_counter()
         batch = eng.step()
+        t_step = time.perf_counter() - t_step
         torch.cuda.nvtx.range_pop()
         if batch is not None:
             torch.cuda.nvtx.mark(f"{batch.phase.value} {len(batch.requests)}")
@@ -146,9 +150,11 @@ def run(eng: Engine, w: Workload) -> RunResult:
             res.prefill_steps += 1
         elif batch.phase is Phase.MIXED:
             res.mixed_steps += 1
+            res.mixed_step_s.append(t_step)
         else:
             res.decode_steps += 1
             res.decode_batch_sum += len(batch.requests)
+            res.decode_step_s.append(t_step)
         for r, k in zip(batch.requests, done):
             times = token_times[req_index[r.rid]]
             if k > len(times):  # this step gave the request a token (a prefill chunk may not)
@@ -176,6 +182,7 @@ def pct(xs: list[float], q: float) -> float:
 ABLATIONS = {
     "radix": ("radix_on", "radix_off"),
     "chunked": ("chunk_2048", "chunk_512", "chunk_off"),
+    "cuda_graph": ("graph_on", "graph_off"),
     "none": ("default",),
 }
 
@@ -188,6 +195,11 @@ def set_arm(eng: Engine, arm: str) -> None:
         kv.set_radix(False)
     elif arm == "default":
         kv.set_radix(kv.radix)  # clears the prefix cache
+    elif arm in ("graph_on", "graph_off"):
+        if eng.runner.graphs is None:
+            raise SystemExit("--ablate cuda_graph needs the decode graphs captured (no --disable-cuda-graph)")
+        kv.set_radix(kv.radix)
+        eng.runner.use_cuda_graph = arm == "graph_on"
     elif arm.startswith("chunk_"):
         kv.set_radix(kv.radix)
         eng.scheduler.chunked_prefill_size = 0 if arm == "chunk_off" else int(arm.removeprefix("chunk_"))
@@ -311,6 +323,9 @@ def main() -> int:
                     mixed_steps=r.mixed_steps,
                     chunked_prefill_size=eng.scheduler.chunked_prefill_size,
                     mean_decode_batch=round(r.decode_batch_sum / max(1, r.decode_steps), 2),
+                    decode_step_ms=round(statistics.mean(r.decode_step_s) * 1e3, 2) if r.decode_step_s else "",
+                    mixed_step_ms=round(statistics.mean(r.mixed_step_s) * 1e3, 2) if r.mixed_step_s else "",
+                    cuda_graph=eng.runner.use_cuda_graph,
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
                 )
@@ -343,7 +358,7 @@ def main() -> int:
 def print_summary(rows: list[dict], arms: tuple[str, ...]) -> None:
     keys = [
         "ttft_p50_ms", "ttft_p95_ms", "ttft_long_p50_ms", "itl_p50_ms", "itl_p99_ms", "itl_max_ms",
-        "output_tok_s", "prefill_tokens_computed", "hit_rate", "preemptions",
+        "output_tok_s", "decode_step_ms", "mixed_step_ms", "prefill_tokens_computed", "hit_rate", "preemptions",
     ]
     keys = [k for k in keys if all(r[k] != "" for r in rows)]
     med = {a: {k: statistics.median(r[k] for r in rows if r["arm"] == a) for k in keys} for a in arms}

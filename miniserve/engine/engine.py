@@ -36,11 +36,15 @@ class Engine:
         runner: ModelRunner | None = None,
         radix: bool = True,
         chunked_prefill_size: int | None = None,
+        cuda_graph: bool = True,
+        cuda_graph_max_bs: int | None = None,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
         ``chunked_prefill_size``: token budget per step with prefills cut into chunks and batched
         with decodes; 0 disables; default 2048 with paged attention, 0 with contiguous.
+        ``cuda_graph``: replay captured CUDA Graphs for decode steps of up to ``cuda_graph_max_bs``
+        requests (default ``max_running``; paged attention only).
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -51,6 +55,8 @@ class Engine:
                 max_prefill_tokens=max_prefill_tokens,
                 max_running=max_running,
                 radix=radix,
+                cuda_graph=cuda_graph,
+                cuda_graph_max_bs=cuda_graph_max_bs,
             )
         self.runner = runner
         if chunked_prefill_size is None:

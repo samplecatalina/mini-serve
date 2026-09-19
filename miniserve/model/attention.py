@@ -86,6 +86,7 @@ class FlashInferPagedAttention:
         self.num_heads = num_heads
         self.scale = scale
         workspace = torch.empty(self.WORKSPACE_BYTES, dtype=torch.uint8, device=pool.device)
+        self.workspace = workspace  # shared with the decode graphs' wrappers (one pass runs at a time)
         self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="NHD", backend="fa2")
         # Tensor-core decode only pays off for large query groups (GQA >= 4).
         self._decode = flashinfer.BatchDecodeWithPagedKVCacheWrapper(

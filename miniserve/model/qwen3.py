@@ -183,16 +183,26 @@ class Qwen3ForCausalLM:
         h = _rms_norm(h[last], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
         return F.linear(h, self.w["lm_head.weight"])
 
+    def decode_logits(self, input_ids: torch.Tensor, positions: torch.Tensor, attn: AttentionBackend) -> torch.Tensor:
+        """One new token per sequence: logits ``[T, vocab]``, the same operations as
+        :meth:`forward_with` with every ``seq_lens`` entry 1, minus its last-token gather
+        (an identity here) and the host-to-device copy that gather needs. Capturable in a
+        CUDA Graph: no host synchronization."""
+        h = self._hidden(input_ids, positions, attn, None)
+        h = _rms_norm(h, self.w["model.norm.weight"], self.cfg.rms_norm_eps)
+        return F.linear(h, self.w["lm_head.weight"])
+
     def _hidden(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         attn: AttentionBackend,
-        seq_lens: list[int],
+        seq_lens: list[int] | None,
     ) -> torch.Tensor:
-        """Decoder stack; returns final hidden states ``[num_tokens, hidden]`` before the last norm."""
+        """Decoder stack; returns final hidden states ``[num_tokens, hidden]`` before the last norm.
+        ``seq_lens`` None: one token per sequence."""
         cfg, w = self.cfg, self.w
-        if sum(seq_lens) != input_ids.shape[0]:
+        if seq_lens is not None and sum(seq_lens) != input_ids.shape[0]:
             raise ValueError(f"seq_lens {seq_lens} do not match {input_ids.shape[0]} tokens")
         cos, sin = self._rope(positions)
 

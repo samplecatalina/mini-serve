@@ -28,6 +28,14 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="tokens per step, decodes included, with prefills cut into chunks batched with decodes; "
         "0: whole prefills in prefill-only steps (default: 2048 with paged attention)",
     )
+    g.add_argument("--disable-cuda-graph", action="store_true", help="run decode steps eagerly (no CUDA Graphs)")
+    g.add_argument(
+        "--cuda-graph-max-bs",
+        type=int,
+        default=None,
+        help="largest decode batch captured in a CUDA Graph (default: --max-running); "
+        "graphs are captured for powers of two below it and for it",
+    )
 
 
 def engine_kwargs(args: argparse.Namespace) -> dict:
@@ -39,4 +47,6 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         seed=args.seed,
         radix=not args.disable_radix,
         chunked_prefill_size=args.chunked_prefill_size,
+        cuda_graph=not args.disable_cuda_graph,
+        cuda_graph_max_bs=args.cuda_graph_max_bs,
     )
