@@ -159,7 +159,13 @@ def main() -> int:
         row["device"] = name
         row["git_commit"] = env["git_commit"][:12]
 
-    best_copy = max((r for r in rows if r["kernel"] == "copy"), key=lambda r: r["gb_s"])
+    # The denominator is the largest copy, not the fastest one. A buffer near the
+    # L2 cache's size is partly served by L2 and reads high; a decode step streams
+    # over a gigabyte of weights and KV per step, so the large-buffer figure is the
+    # one that bounds it. The smaller sizes are kept as rows: the gap between them
+    # is the L2's contribution, and it is worth seeing.
+    copies = [r for r in rows if r["kernel"] == "copy"]
+    best_copy = max(copies, key=lambda r: r["bytes"])
     best_gemm = max((r for r in rows if r["kernel"] == "gemm"), key=lambda r: r["tflop_s"])
 
     os.makedirs(results_dir, exist_ok=True)
@@ -198,7 +204,8 @@ def main() -> int:
         rate = f"{row['gb_s']} GB/s" if row["kernel"] == "copy" else f"{row['tflop_s']} TFLOP/s"
         pct = f"  {row['pct_of_spec']}% of {spec} GB/s spec" if row["pct_of_spec"] != "" else ""
         print(f"  {row['kernel']:5s} {row['size']:>7s}  {row['ms_median']:9.4f} ms  {rate:>16s}{pct}")
-    print(f"\ndenominators: copy {best_copy['gb_s']} GB/s, BF16 GEMM {best_gemm['tflop_s']} TFLOP/s")
+    print(f"\ndenominators: copy {best_copy['gb_s']} GB/s at {best_copy['size']} (the largest, so DRAM bound),"
+          f" BF16 GEMM {best_gemm['tflop_s']} TFLOP/s at n={best_gemm['size']}")
     print(json.dumps(gpu_during["sm_mhz"] | {"reasons": gpu_during["clocks_event_reasons"]}))
     return 0
 
