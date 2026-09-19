@@ -17,14 +17,18 @@ case $DEVICE in
   h100) GPU="H100"; ARCH=9.0;;
   *) echo "unknown DEVICE $DEVICE" >&2; exit 2;;
 esac
-mkdir -p "$REPO/results/$DEVICE" "$TMPDIR"
+# Results go outside the clone: a job that writes into it leaves the working tree
+# dirty, which blocks the next `git pull` and makes the benchmark refuse to run.
+OUT=${OUT:-$PROJECT/results/$DEVICE}
+mkdir -p "$OUT" "$TMPDIR"
 cd "$REPO"
 el "node $(hostname), commit $(git rev-parse --short HEAD), image $(sha256sum "$SIF" | cut -c1-16)"
 el "preflight"; bash psc/preflight.sh "$SIF" "$CACHE" "$GPU"
 RUN=(apptainer exec --nv --cleanenv --no-home --env HOME=/tmp --env FLASHINFER_CUDA_ARCH_LIST=$ARCH
      --env TORCH_CUDA_ARCH_LIST=$ARCH --env PYTHONPATH=/workspace --bind "$REPO:/workspace"
-     --bind "$CACHE:/cache" --bind "$TMPDIR:/tmp" --pwd /workspace "$SIF")
+     --bind "$CACHE:/cache" --bind "$TMPDIR:/tmp" --bind "$OUT:/out" --pwd /workspace "$SIF")
 el "clocks before"; nvidia-smi --query-gpu=clocks.current.sm,clocks.current.memory,temperature.gpu,power.draw,enforced.power.limit,clocks_event_reasons.active --format=csv
-el "roofline"; "${RUN[@]}" python -m bench.roofline "$@"
+el "roofline"; "${RUN[@]}" python -m bench.roofline --results-dir /out "$@"
+el "wrote to $OUT"; ls -l "$OUT"
 el "clocks after"; nvidia-smi --query-gpu=clocks.current.sm,clocks.current.memory,temperature.gpu,power.draw,enforced.power.limit,clocks_event_reasons.active --format=csv
 el "done"
