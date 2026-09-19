@@ -122,6 +122,8 @@ def run(eng: Engine, w: Workload) -> RunResult:
         torch.cuda.nvtx.range_push("step")
         batch = eng.step()
         torch.cuda.nvtx.range_pop()
+        if batch is not None:
+            torch.cuda.nvtx.mark(f"{batch.phase.value} {len(batch.requests)}")
         t = time.perf_counter() - t0
         if batch is None:
             continue
@@ -235,6 +237,7 @@ def main() -> int:
 
         w = make_workload(args, seed=args.workload_seed)
         rows, per_run_gpu = [], []
+        torch.cuda.nvtx.range_push("measure")  # profilers can capture just this range
         for k, arm in enumerate(abba(arms, args.rounds)):
             set_arm(eng, arm)
             eng.scheduler.stats = dict.fromkeys(eng.scheduler.stats, 0)
@@ -273,6 +276,7 @@ def main() -> int:
                 )
             )
             print(" ".join(f"{k}={v}" for k, v in rows[-1].items() if k not in ("run_id", "git_commit")), flush=True)
+        torch.cuda.nvtx.range_pop()
 
     csv_path = f"{args.results_dir}/{args.out}.csv"
     new = not os.path.exists(csv_path)

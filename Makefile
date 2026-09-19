@@ -72,6 +72,7 @@ profile-offline:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NSYS_HOST):/opt/nsys:ro \
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
 		$(IMAGE) /opt/nsys/target-linux-x64/nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false \
+		--capture-range=nvtx --nvtx-capture=measure --capture-range-end=stop \
 		-o $(NSYS_OUT) -f true python -m bench.offline $(BENCH_ARGS)
 
 bench-decode-sharing:
