@@ -270,7 +270,9 @@ def main() -> int:
             eng.scheduler.stats = dict.fromkeys(eng.scheduler.stats, 0)
             preempt0 = eng.scheduler.num_preemptions
             t_start = gpu.sample_now()
+            torch.cuda.nvtx.range_push(f"run {k} {arm}")
             r = run(eng, w)
+            torch.cuda.nvtx.range_pop()
             gpu_run = gpu.summary(since=t_start, until=gpu.sample_now())
             per_run_gpu.append(dict(run=k, arm=arm, **gpu_run))
             st = eng.scheduler.stats
