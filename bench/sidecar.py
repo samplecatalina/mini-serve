@@ -6,7 +6,8 @@ not met or a field cannot be read, so no number exists without its context.
 
 Preflight (idle GPU, before any work):
 
-- expected GPU model;
+- a known GPU model, which selects the device profile below (results directory
+  and the checks that apply to it);
 - the power limit at its configured maximum: ``power.max_limit`` 140 W on
   the RTX 4060 Laptop GPU in its high-performance power mode (a misconfigured
   mode shows 80 W). The laptop's dynamic power sharing between CPU and GPU
@@ -15,9 +16,11 @@ Preflight (idle GPU, before any work):
   enforced value is recorded, idle and as a trajectory during the run,
   together with the throttle reasons that show whether it ever bound;
 - ``utilization.gpu`` and ``memory.used`` low (no other GPU work);
-- the host on AC power and in its high-performance power scheme. These live
-  on the Windows side of WSL2 and are passed in by the launcher as
-  ``MINISERVE_HOST_POWER`` (JSON); a missing value fails the preflight.
+- on the development laptop, the host on AC power and in its high-performance
+  power scheme. These live on the Windows side of WSL2 and are passed in by
+  the launcher as ``MINISERVE_HOST_POWER`` (JSON); a missing value fails the
+  preflight. Cluster GPUs (a whole GPU allocated to the job) have no host
+  power state to check and their power limit is only recorded.
 
 Clocks cannot be locked on this GPU, so they are recorded instead: SM and
 memory clock, temperature, power draw, power limit and throttle reasons,
@@ -39,10 +42,30 @@ FIELDS = (
     "clocks_event_reasons.active,utilization.gpu,memory.used"
 )
 
-EXPECTED_GPU = "NVIDIA GeForce RTX 4060 Laptop GPU"
-POWER_LIMIT_W = 140.0
 MAX_IDLE_UTIL = 10  # percent
-MAX_IDLE_MEM_MIB = 2048  # the Windows desktop holds some memory
+
+
+@dataclasses.dataclass(frozen=True)
+class DeviceProfile:
+    results_dir: str
+    power_max_limit_w: float | None  # asserted when set
+    host_power: bool  # a laptop under WSL2: check the Windows power state
+    max_idle_mem_mib: int
+
+
+DEVICES = {
+    # the Windows desktop holds some GPU memory
+    "NVIDIA GeForce RTX 4060 Laptop GPU": DeviceProfile("results/rtx4060-laptop", 140.0, True, 2048),
+    "NVIDIA L40S": DeviceProfile("results/l40s", None, False, 1024),
+    "NVIDIA H100 80GB HBM3": DeviceProfile("results/h100", None, False, 1024),
+}
+
+
+def device_profile() -> tuple[str, DeviceProfile]:
+    name = sample_gpu().name
+    if name not in DEVICES:
+        raise PreflightError(f"GPU {name!r} has no device profile (known: {sorted(DEVICES)})")
+    return name, DEVICES[name]
 
 
 class PreflightError(RuntimeError):
@@ -99,20 +122,19 @@ def preflight(num_samples: int = 6, interval_s: float = 0.5) -> dict:
             time.sleep(interval_s)
         idle.append(sample_gpu())
     s = idle[-1]
+    _, prof = device_profile()
     max_limit = _max_power_limit()
-    host = host_power()
+    host = host_power() if prof.host_power else None
     problems = []
-    if s.name != EXPECTED_GPU:
-        problems.append(f"GPU is {s.name!r}, expected {EXPECTED_GPU!r}")
-    if abs(max_limit - POWER_LIMIT_W) > 0.5:
-        problems.append(f"power.max_limit is {max_limit} W, expected {POWER_LIMIT_W} W")
+    if prof.power_max_limit_w is not None and abs(max_limit - prof.power_max_limit_w) > 0.5:
+        problems.append(f"power.max_limit is {max_limit} W, expected {prof.power_max_limit_w} W")
     if max(x.util for x in idle) > MAX_IDLE_UTIL:
         problems.append(f"GPU utilization up to {max(x.util for x in idle)}% before the run (another GPU workload?)")
-    if s.mem_used_mib > MAX_IDLE_MEM_MIB:
+    if s.mem_used_mib > prof.max_idle_mem_mib:
         problems.append(f"{s.mem_used_mib} MiB of GPU memory in use before the run")
-    if not host.get("ac_power"):
+    if host is not None and not host.get("ac_power"):
         problems.append("host is not on AC power")
-    if not host.get("high_performance"):
+    if host is not None and not host.get("high_performance"):
         problems.append(f"host power scheme is {host.get('power_scheme')!r}, not the high-performance one")
     if problems:
         raise PreflightError("; ".join(problems))

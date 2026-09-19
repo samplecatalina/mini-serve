@@ -48,7 +48,6 @@ from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from miniserve.model.weights import QWEN3_0_6B, load_config, load_weights, model_path
 
 VOCAB_LIMIT = 150_000  # random prompt ids stay below the special-token range
-RESULTS_DIR = "results/rtx4060-laptop"
 
 
 # --------------------------------------------------------------------------- workloads
@@ -265,12 +264,13 @@ def main() -> int:
     g.add_argument("--arms", nargs="+", default=None, help="run only these arms of the ablation (e.g. under a profiler)")
     g.add_argument("--warmup-min-s", type=float, default=10.0)
     g.add_argument("--warmup-max-s", type=float, default=90.0)
-    g.add_argument("--out", required=True, help=f"results name: {RESULTS_DIR}/<out>.csv and a sidecar per run id")
+    g.add_argument("--out", required=True, help="results name: results/<device>/<out>.csv and a sidecar per run id")
     g.add_argument("--allow-dirty", action="store_true", help="development only: results from uncommitted code")
-    g.add_argument("--results-dir", default=RESULTS_DIR)
+    g.add_argument("--results-dir", default=None, help="default: the device profile's (bench/sidecar.py)")
     args = ap.parse_args()
 
     pre = sidecar.preflight()  # before loading anything onto the GPU
+    args.results_dir = args.results_dir or sidecar.device_profile()[1].results_dir
     env = sidecar.environment()
     if env["git_dirty"] and not args.allow_dirty:
         print("refusing to measure uncommitted code (tracked files modified)", file=sys.stderr)

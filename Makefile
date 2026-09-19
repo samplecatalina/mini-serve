@@ -21,6 +21,10 @@ BENCH_ARGS  ?=
 # The development laptop uses a vendor scheme; elsewhere Windows' own
 # "High performance" GUID is the default of bench/host_power.sh.
 HIGH_PERF_SCHEME ?= 52521609-efc9-4268-b9ba-67dea73f18b2
+# Apptainer image of the development image, for the cluster: built by the official
+# apptainer container from a `docker save` of $(IMAGE), so both run the same bytes.
+SIF_DIR     ?= $(HOME)/sif
+APPTAINER   ?= ghcr.io/apptainer/apptainer@sha256:cfc99015d4af5e4f3f52ce5d5e569ed1e214b4d49a56a2f77b140d5e9cbee595
 # Nsight Systems on the host, mounted read-only into the container for profiling.
 NSYS_HOST   ?= /opt/nvidia/nsight-systems/2026.1.3
 NSYS_OUT    ?= profiling/rtx4060-laptop/offline
@@ -28,7 +32,7 @@ NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
 NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
 NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image lock shell env-check weights test bench profile bench-offline profile-offline bench-decode-sharing ncu-decode-sharing
+.PHONY: help image lock shell env-check weights test bench profile bench-offline profile-offline bench-decode-sharing ncu-decode-sharing sif
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -41,6 +45,7 @@ help:
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench-decode-sharing  decode attention with and without shared KV blocks"
 	@echo "ncu-decode-sharing    one layout of it under Nsight Compute (BENCH_ARGS='--case shared --iters 3')"
+	@echo "sif        convert the development image to an Apptainer image (SIF_DIR) for the cluster"
 	@echo "bench      not implemented yet"
 	@echo "profile    not implemented yet"
 
@@ -84,6 +89,15 @@ ncu-decode-sharing:
 	mkdir -p $(dir $(NCU_OUT))
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NCU_HOST):/opt/ncu:ro $(IMAGE) \
 		/opt/ncu/ncu -k regex:BatchDecode $(NCU_ARGS) -o $(NCU_OUT) -f python -m bench.decode_sharing $(BENCH_ARGS)
+
+sif:
+	mkdir -p $(SIF_DIR)
+	docker save $(IMAGE) -o $(SIF_DIR)/image.tar
+	docker run --rm --privileged -v $(SIF_DIR):/work $(APPTAINER) \
+		apptainer build -F /work/miniserve.sif docker-archive:///work/image.tar
+	rm -f $(SIF_DIR)/image.tar
+	docker image inspect $(IMAGE) --format '{{.Id}}' > $(SIF_DIR)/miniserve.sif.docker-id
+	sha256sum $(SIF_DIR)/miniserve.sif | tee $(SIF_DIR)/miniserve.sif.sha256
 
 bench profile:
 	@echo "make $@: not implemented yet" >&2; exit 1
