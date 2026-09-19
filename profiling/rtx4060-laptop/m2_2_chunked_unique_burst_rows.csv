@@ -1,0 +1,3 @@
+run_id,run,arm,workload,arrival_rate,requests,prompt_tokens,output_tokens,kv_pool_tokens,ttft_p50_ms,ttft_p95_ms,ttft_long_p50_ms,ttft_short_p50_ms,itl_p50_ms,itl_p99_ms,itl_max_ms,output_tok_s,span_s,prefill_tokens_computed,hit_rate,cached_tokens,preemptions,prefill_steps,decode_steps,mixed_steps,chunked_prefill_size,mean_decode_batch,sm_mhz_mean,git_commit
+20260919T090414,0,chunk_512,unique,0.0,64,69632,4096,32768,3039.55,6073.14,,3039.55,46.42,48.74,48.74,496.2,8.255,69632,0.0,0,0,3,65,141,512,14.65,2520.0,da3ee773595e
+20260919T090414,1,chunk_off,unique,0.0,64,69632,4096,32768,4594.68,8720.92,,4594.68,29.91,619.58,1673.22,388.1,10.553,71844,0.0,0,2,12,189,0,0,21.32,2520.0,da3ee773595e
