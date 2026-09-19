@@ -127,7 +127,8 @@ def run(eng: Engine, w: Workload) -> RunResult:
             continue
         if batch.phase is Phase.PREFILL:
             res.prefill_steps += 1
-            res.prefill_tokens_computed += sum(batch.seq_lens)
+            # After the step each request holds one more token than the prefill ran.
+            res.prefill_tokens_computed += sum(r.seq_len - 1 - r.num_cached_tokens for r in batch.requests)
         else:
             res.decode_steps += 1
             res.decode_batch_sum += len(batch.requests)
