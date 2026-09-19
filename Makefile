@@ -24,8 +24,11 @@ HIGH_PERF_SCHEME ?= 52521609-efc9-4268-b9ba-67dea73f18b2
 # Nsight Systems on the host, mounted read-only into the container for profiling.
 NSYS_HOST   ?= /opt/nvidia/nsight-systems/2026.1.3
 NSYS_OUT    ?= profiling/rtx4060-laptop/offline
+NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
+NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
+NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image lock shell env-check weights test bench profile bench-offline profile-offline
+.PHONY: help image lock shell env-check weights test bench profile bench-offline profile-offline bench-decode-sharing ncu-decode-sharing
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -36,6 +39,8 @@ help:
 	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests)"
 	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
+	@echo "bench-decode-sharing  decode attention with and without shared KV blocks"
+	@echo "ncu-decode-sharing    one layout of it under Nsight Compute (BENCH_ARGS='--case shared --iters 3')"
 	@echo "bench      not implemented yet"
 	@echo "profile    not implemented yet"
 
@@ -68,6 +73,16 @@ profile-offline:
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
 		$(IMAGE) /opt/nsys/target-linux-x64/nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false \
 		-o $(NSYS_OUT) -f true python -m bench.offline $(BENCH_ARGS)
+
+bench-decode-sharing:
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
+		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		$(IMAGE) python -m bench.decode_sharing $(BENCH_ARGS)
+
+ncu-decode-sharing:
+	mkdir -p $(dir $(NCU_OUT))
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NCU_HOST):/opt/ncu:ro $(IMAGE) \
+		/opt/ncu/ncu -k regex:BatchDecode $(NCU_ARGS) -o $(NCU_OUT) -f python -m bench.decode_sharing $(BENCH_ARGS)
 
 bench profile:
 	@echo "make $@: not implemented yet" >&2; exit 1
