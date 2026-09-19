@@ -1,0 +1,270 @@
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - 👋 Welcome to genai-bench 0.0.5! I am an intelligent benchmark tool for Large Language Model.
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - Options you provided:
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - num_concurrency: (4,)
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - batch_size: [1]
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_bucket: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - api_backend: openai
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - api_base: http://127.0.0.1:8000
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - api_key: none
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - task: text-to-text
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - api_model_name: Qwen/Qwen3-0.6B
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - model_tokenizer: /cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - max_time_per_run: 2
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - max_requests_per_run: 512
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - warmup_ratio: 0.25
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - metrics_time_unit: ms
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - experiment_base_dir: results/rtx4060-laptop
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - experiment_folder_name: m4_1_main.20260919T232620.genai-bench/c4
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - log_dir: results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - additional_request_params: {'temperature': 0, 'ignore_eos': True}
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - traffic_scenario: ['D(1024,256)']
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - gcp_credentials_path: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - gcp_location: us-central1
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - gcp_project_id: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - azure_ad_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - azure_api_version: 2024-02-01
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - azure_deployment: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - azure_endpoint: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - aws_region: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - aws_profile: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - aws_session_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - aws_secret_access_key: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - aws_access_key_id: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - model_api_key: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - model_auth_type: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - region: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - security_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - profile: DEFAULT
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - config_file: ~/.oci/config
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - auth: user_principal
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - server_engine: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - server_version: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - server_gpu_type: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - server_gpu_count: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - model: c1899de289a04d12100db370d81485cdf75e47ca
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - iteration_type: num_concurrency
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - cooldown_ratio: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - prefix_ratio: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - prefix_len: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - dataset_path: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - dataset_prompt_column: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - dataset_image_column: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - dataset_config: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - spawn_rate: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - num_workers: 0
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - master_port: 5557
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - upload_results: False
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - namespace: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - github_repo: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - github_owner: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - github_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_gcp_credentials_path: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_gcp_project_id: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_azure_sas_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_azure_connection_string: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_azure_account_key: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_azure_account_name: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_aws_profile: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_aws_region: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_aws_session_token: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_aws_secret_access_key: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_aws_access_key_id: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_auth_type: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_prefix: 
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - storage_provider: oci
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - metrics_refresh_interval: None
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - Using openai authentication
+INFO     2026-09-19 23:28:31.%f - genai_bench.data.sources:_load_text_file - Loading text file: /usr/local/lib/python3.12/site-packages/genai_bench/data/sonnet.txt
+INFO     2026-09-19 23:28:31.%f - genai_bench.data.sources:_load_text_file - Loaded 84 lines from text file
+WARNING  2026-09-19 23:28:31.%f - genai_bench.cli.utils:get_experiment_path - ‼️ The folder /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4 already exists. Data might be overridden.
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - This experiment will be saved in folder /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4.
+INFO     2026-09-19 23:28:31.%f - genai_bench.benchmark:benchmark - Starting benchmark with concurrency=4, spawn_rate=4
+INFO     2026-09-19 23:28:31.%f - locust.runners:_start - Ramping to 4 users at a rate of 4.00 per second
+INFO     2026-09-19 23:28:31.%f - locust.runners:_start - All users spawned: {"OpenAIUser": 4} (4 total users)
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - Filtering out first 43/172 warmup requests.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 0th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 1th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 2th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 3th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 4th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 5th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 6th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 7th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 8th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 9th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 10th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 11th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 12th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 13th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 14th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 15th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 16th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 17th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 18th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 19th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 20th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 21th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 22th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 23th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 24th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 25th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 26th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 27th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 28th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 29th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 30th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 31th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 32th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 33th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 34th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 35th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 36th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 37th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 38th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 39th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 40th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 41th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 42th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 43th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 44th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 45th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 46th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 47th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 48th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 49th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 50th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 51th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 52th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 53th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 54th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 55th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 56th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 57th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 58th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 59th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 60th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 61th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 62th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 63th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 64th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 65th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 66th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 67th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 68th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 69th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 70th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 71th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 72th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 73th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 74th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 75th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 76th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 77th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 78th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 79th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 80th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 81th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 82th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 83th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 84th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 85th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 86th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 87th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 88th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 89th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 90th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 91th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 92th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 93th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 94th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 95th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 96th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 97th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 98th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 99th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 100th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 101th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 102th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 103th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 104th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 105th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 106th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 107th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 108th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 109th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 110th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 111th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 112th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 113th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 114th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 115th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 116th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 117th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 118th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 119th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 120th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 121th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 122th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 123th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 124th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 125th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 126th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 127th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 128th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 129th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 130th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 131th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 132th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 133th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 134th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 135th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 136th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 137th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 138th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 139th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 140th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 141th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 142th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 143th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 144th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 145th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 146th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 147th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 148th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 149th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 150th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 151th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 152th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 153th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 154th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 155th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 156th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 157th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 158th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 159th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 160th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 161th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 162th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 163th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 164th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 165th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 166th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 167th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 168th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 169th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 170th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.metrics.aggregated_metrics_collector:aggregate_metrics_data - 171th request has NoneType value in metric audio_throughput.
+INFO     2026-09-19 23:30:32.%f - genai_bench.benchmark:benchmark - ⏩ Run for scenario D(1024,256), num_concurrency 4 has finished after 120 seconds.
+INFO     2026-09-19 23:30:33.%f - genai_bench.analysis.plot_report:plot_single_scenario_inference_speed_vs_throughput - 🎨 Saving interim plot: /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/interim_D1024_256_output_speed_vs_throughput.png
+INFO     2026-09-19 23:30:35.%f - genai_bench.benchmark:benchmark - 🚀 The whole experiment has finished!
+INFO     2026-09-19 23:30:35.%f - genai_bench.analysis.excel_report:create_workbook - 📊 Saving excel to /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/c4_summary.xlsx
+INFO     2026-09-19 23:30:35.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_Output Inference Speed per Request vs Output Throughput of Server.png
+INFO     2026-09-19 23:30:35.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_TTFT vs Output Throughput of Server.png
+INFO     2026-09-19 23:30:35.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_Mean E2E Latency per Request vs RPS.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_Error Rates by HTTP Status vs Concurrency.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_Output Inference Speed per Request vs Total Throughput Input + Output of Server.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_TTFT vs Total Throughput Input + Output of Server.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_P90 E2E Latency per Request vs RPS.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_save_individual_subplots_multiline - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_P99 E2E Latency per Request vs RPS.png
+INFO     2026-09-19 23:30:36.%f - genai_bench.analysis.flexible_plot_report:_finalize_and_save_plots - 🎨 Saving /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4/traffic_scenario_combined_plots_2x4.png
+INFO     2026-09-19 23:30:37.%f - genai_bench.benchmark:benchmark - 📁 Please check /workspace/results/rtx4060-laptop/m4_1_main.20260919T232620.genai-bench/c4 for the detailed results, sheets, and plots.
