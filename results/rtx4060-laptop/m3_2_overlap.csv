@@ -1,0 +1,7 @@
+run_id,run,arm,workload,arrival_rate,requests,prompt_tokens,output_tokens,kv_pool_tokens,ttft_p50_ms,ttft_p95_ms,ttft_long_p50_ms,ttft_short_p50_ms,itl_p50_ms,itl_p99_ms,itl_max_ms,output_tok_s,span_s,prefill_tokens_computed,hit_rate,cached_tokens,preemptions,prefill_steps,decode_steps,mixed_steps,chunked_prefill_size,mean_decode_batch,decode_step_ms,mixed_step_ms,cuda_graph,overlap,sm_mhz_mean,git_commit
+20260919T192400,0,overlap_on,unique,0.0,4,4352,1024,32768,238.05,252.09,,238.05,10.0,10.76,82.03,364.2,2.811,4352,0.0,0,0,1,255,2,2048,3.98,10.01,49.26,True,True,2520.0,d05961d4e667
+20260919T192400,1,overlap_off,unique,0.0,4,4352,1024,32768,228.59,252.49,,228.59,10.16,11.1,114.34,358.4,2.857,4352,0.0,0,0,1,255,2,2048,3.98,10.18,71.21,True,False,2520.0,d05961d4e667
+20260919T192400,2,overlap_off,unique,0.0,4,4352,1024,32768,228.51,252.64,,228.51,10.17,10.93,115.21,358.5,2.856,4352,0.0,0,0,1,255,2,2048,3.98,10.18,71.78,True,False,2520.0,d05961d4e667
+20260919T192400,3,overlap_on,unique,0.0,4,4352,1024,32768,237.35,251.75,,237.35,9.99,10.76,82.07,364.8,2.807,4352,0.0,0,0,1,255,2,2048,3.98,9.99,49.49,True,True,2520.0,d05961d4e667
+20260919T192400,4,overlap_on,unique,0.0,4,4352,1024,32768,239.52,254.15,,239.52,9.98,11.61,82.89,362.4,2.826,4352,0.0,0,0,1,255,2,2048,3.98,10.06,50.03,True,True,2520.0,d05961d4e667
+20260919T192400,5,overlap_off,unique,0.0,4,4352,1024,32768,229.35,253.1,,229.35,10.74,13.12,115.65,333.3,3.073,4352,0.0,0,0,1,255,2,2048,3.98,11.02,71.77,True,False,2520.0,d05961d4e667
