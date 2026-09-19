@@ -13,7 +13,10 @@ make image       # build the development image
 make env-check   # toolchain, pinned versions, GPU, Triton/FlashInfer JIT, cache locations
 make weights     # download the pinned Qwen3-0.6B snapshot
 make test        # pytest
+make bench-offline BENCH_ARGS="--workload shared --ablate radix --out NAME"   # engine-level benchmark
 ```
+
+Engine-level benchmarks (`bench/offline.py`) feed requests straight into the engine on an open-loop arrival schedule, alternate the compared settings in one process (A B B A ...), and write one CSV row per run to `results/<device>/` together with a sidecar JSON of the measurement conditions (GPU clocks, power limit and throttle reasons, temperature, versions, commit). A run refuses to start if the GPU is busy, the power configuration is wrong, or the working tree has uncommitted changes.
 
 Requirements on the host: an NVIDIA driver supporting CUDA 12.8 or newer and Docker with the NVIDIA container runtime. JIT and model caches live in the `miniserve-cache` Docker volume, mounted at `/cache`.
 
