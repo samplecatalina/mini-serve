@@ -1,0 +1,4 @@
+label,workload,requests,succeeded,concurrency,output_tokens,output_tok_s,ttft_p50_ms,ttft_p95_ms,chunk_gap_p50_ms,chunk_gap_p99_ms,span_s
+run 1,unique,32,32,32,8192,2518.0,314.56,508.75,10.92,26.29,3.253
+run 2,unique,32,32,32,8192,2832.0,90.66,94.42,10.9,12.45,2.893
+run 3,unique,32,32,32,8192,2832.6,93.19,96.98,10.91,11.75,2.892
