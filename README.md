@@ -2,7 +2,20 @@
 
 A single-GPU LLM inference engine: continuous batching, paged KV cache, radix prefix cache, chunked prefill, CPU-GPU overlap scheduling, CUDA Graph decode, a C++ scheduling core, and two-model speculative decoding.
 
-Work in progress. Design notes and measurements will be added under `docs/` and `results/` as they land.
+Work in progress: continuous batching, the paged KV cache, the radix prefix cache and chunked prefill are done; see `docs/design.md` for the design and `docs/optimization-log.md` for every measurement with the prediction made before it.
+
+## Results so far
+
+Engine-level measurements on an RTX 4060 Laptop GPU (Qwen3-0.6B, BF16, 32k-token KV pool; median of 3 runs; rows in `results/rtx4060-laptop/`):
+
+| Change | Workload | Result |
+|---|---|---|
+| Radix prefix cache | 64 requests at once, 8 groups sharing 1024-token prefixes | 1487 vs 409 output tok/s; TTFT p50 1.24 vs 4.63 s |
+| Radix prefix cache | same, 4 req/s | TTFT p50 31 vs 74 ms |
+| Chunked prefill, 512-token chunks | 4 req/s, 8 long (3072-token) prompts among 64 | ITL p99 45 vs 61 ms, ITL max 48 vs 466 ms |
+| Chunked prefill, 512-token chunks | 64 × 1088-token prompts at once | ITL p99 47 vs 615 ms; 535 vs 420 output tok/s |
+
+Why the numbers look the way they do (shared blocks served from L2 in decode; chunks filling GPU time that decode steps leave idle; larger chunks worsening the ITL tail) is in the optimization log.
 
 ## Development environment
 
