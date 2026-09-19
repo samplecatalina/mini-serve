@@ -24,11 +24,12 @@ from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
-from miniserve.engine.request import Request
+from miniserve.engine.request import PLACEHOLDER, Request
 from miniserve.engine.sampler import Sampler, SamplingArgs
 from miniserve.engine.scheduler import Batch, Phase
 from miniserve.model.attention import ContiguousAttention, FlashInferPagedAttention
 from miniserve.model.qwen3 import Qwen3ForCausalLM
+from miniserve.model.transfer import CopyFence, to_device
 
 ATTENTION_MODES = ("paged", "contiguous")
 
@@ -75,6 +76,7 @@ class ModelRunner:
         self.kv: KVCacheManager | None = None
         self.graphs: DecodeGraphs | None = None
         self.use_cuda_graph = False
+        self.fence = CopyFence(model.device)
         if attention == "paged":
             cfg = model.cfg
 
@@ -109,6 +111,7 @@ class ModelRunner:
                     workspace=self.flashinfer.workspace,
                     num_heads=cfg.num_heads,
                     scale=model.attn_scale,
+                    fence=self.fence,
                 )
                 self.use_cuda_graph = True
                 self.kv_profile.update(
@@ -182,8 +185,15 @@ class ModelRunner:
         """Next token of each request, ``[len(batch.requests)]`` int64, left on the device."""
         return self.sampler.sample(logits, self.sampler.prepare(batch.requests))
 
-    def forward(self, batch: Batch) -> torch.Tensor:
-        """Logits ``[len(batch.requests), vocab]`` for the last token of each request."""
+    def forward(self, batch: Batch, fill: tuple[torch.Tensor, dict[int, int]] | None = None) -> torch.Tensor:
+        """Logits ``[len(batch.requests), vocab]`` for the last token of each request.
+
+        ``fill = (tokens, rows)``: the previous step's sampled tokens, still on the device, and
+        the row of each request in them. A decode row whose input is a placeholder (a token not
+        read back yet) takes its token from there, on the device.
+
+        Nothing here waits for the device, so a step can be launched while the previous one
+        is still running."""
         # Any row with more than one new token needs the prefill kernel; decode rows of a mixed
         # batch are causal rows of length 1 to it.
         prefill = batch.phase is not Phase.DECODE
@@ -195,23 +205,42 @@ class ModelRunner:
             pos += range(start, start + n)
         seq_lens = batch.seq_lens
         caches = [r.cache for r in batch.requests]
+        fill_idx = self._fill_rows(batch, ids, fill)
+        # Pinned buffers written below (planning, graph staging) may still feed the previous step's copies.
+        self.fence.wait()
         if self.attention == "paged":
             if any(t.num_tokens != s for t, s in zip(caches, batch.starts)):
                 raise RuntimeError("batch starts disagree with the block tables")
             self._reserve(caches, seq_lens)
             slots = [t.slot(p) for t, n in zip(caches, seq_lens) for p in range(t.num_tokens - n, t.num_tokens)]
             if not prefill and self.use_cuda_graph and len(caches) <= self.graphs.max_batch:
-                return self.graphs.run(ids, pos, slots, caches)
+                return self.graphs.run(ids, pos, slots, caches, fill_idx)
             self.flashinfer.plan(prefill, seq_lens, caches, slots)
             attn = self.flashinfer
         else:
             attn = ContiguousAttention(caches, seq_lens, self.model.attn_scale)
-        return self.model.forward_with(
-            torch.tensor(ids, device=self.device, dtype=torch.long),
-            torch.tensor(pos, device=self.device, dtype=torch.long),
-            attn,
-            seq_lens,
-        )
+        ids_t = to_device(ids, torch.long, self.device)
+        if fill_idx is not None:
+            ids_t.index_copy_(0, *fill_idx)
+        pos_t = to_device(pos, torch.long, self.device)
+        self.fence.mark()
+        return self.model.forward_with(ids_t, pos_t, attn, seq_lens)
+
+    def _fill_rows(
+        self, batch: Batch, ids: list[int], fill: tuple[torch.Tensor, dict[int, int]] | None
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """(positions in ``ids``, device tokens) replacing placeholders. Only a decode row's
+        input can be one; decode rows come first, one token each, so row i is ``ids[i]``."""
+        dst = [i for i in range(batch.num_decode) if ids[i] == PLACEHOLDER]
+        if len(dst) != ids.count(PLACEHOLDER):
+            raise RuntimeError("a placeholder token outside the decode rows")
+        if not dst:
+            return None
+        if fill is None:
+            raise RuntimeError("placeholder input tokens without the previous step's samples")
+        tokens, rows = fill
+        src = [rows[batch.requests[i].rid] for i in dst]
+        return to_device(dst, torch.long, self.device), tokens.index_select(0, to_device(src, torch.long, tokens.device))
 
     def _reserve(self, tables: list[BlockTable], seq_lens: list[int]) -> None:
         """Extend every table by its new tokens. If the pool is short even after evicting

@@ -29,6 +29,7 @@ from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
 from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.engine.cuda_graph import bucket_for, graph_buckets
+from miniserve.model.transfer import CopyFence
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import InvalidTransition, Request, RequestState, SamplingParams
@@ -90,8 +91,8 @@ def test_preempted_between_chunks():
     "path",
     [
         [RequestState.DECODE],  # must prefill first
-        [RequestState.FINISHED],
         [RequestState.WAITING],
+        [RequestState.PREFILL, RequestState.DECODE, RequestState.WAITING, RequestState.DECODE],  # re-prefill first
         [RequestState.PREFILL, RequestState.DECODE, RequestState.PREFILL],
         [RequestState.ABORTED, RequestState.PREFILL],
         [RequestState.PREFILL, RequestState.FINISHED, RequestState.ABORTED],
@@ -495,8 +496,9 @@ def _step_checked(eng: Engine, chunk: int):
     step within its token budget. (A budget error shows up as OutOfBlocks inside the step.)"""
     batch = eng.step()
     eng.runner.kv.check_invariants()
-    if batch is not None and chunk:
-        assert sum(batch.extend_lens) <= chunk, (batch.phase, batch.extend_lens)
+    launched = eng.launched
+    if launched is not None and chunk:
+        assert sum(launched.extend_lens) <= chunk, (launched.phase, launched.extend_lens)
     return batch
 
 
@@ -509,20 +511,24 @@ def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     runner.kv = KVCacheManager(runner.allocator, kw.pop("radix", True))
     runner.sampler = Sampler("cpu", TOY_VOCAB)
     runner.graphs, runner.use_cuda_graph = None, False
+    runner.fence = CopyFence("cpu")
     return Engine(None, runner=runner, **kw)
 
 
+@pytest.mark.parametrize("overlap", [True, False])
 @pytest.mark.parametrize("chunk", [0, 3, 2048])
 @pytest.mark.parametrize("num_blocks", [8, 16, 64])
 @pytest.mark.parametrize("seed", range(10))
-def test_simulated_load_under_kv_pressure(seed, num_blocks, chunk):
+def test_simulated_load_under_kv_pressure(seed, num_blocks, chunk, overlap):
     """Random arrivals, lengths and sampling settings in a small pool: no OutOfBlocks, no stall,
     and every output (greedy or sampled) equals the request run alone, preempted or not."""
     import random
 
     rng = random.Random(seed)
     block_size = 4
-    eng = _toy_engine(num_blocks, block_size, max_running=16, max_prefill_tokens=48, chunked_prefill_size=chunk)
+    eng = _toy_engine(
+        num_blocks, block_size, max_running=16, max_prefill_tokens=48, chunked_prefill_size=chunk, overlap=overlap
+    )
     cap = num_blocks * block_size
     arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
     for _ in range(40):
@@ -546,6 +552,49 @@ def test_simulated_load_under_kv_pressure(seed, num_blocks, chunk):
     if num_blocks == 8:
         assert eng.scheduler.num_preemptions > 0, "the small pool should force preemption"
     print(f"\nseed {seed}, {num_blocks} blocks: {step} steps, {eng.scheduler.num_preemptions} preemptions")
+
+
+def test_overlap_edge_cases_occur_in_simulation(monkeypatch):
+    """The simulated loads above, with overlap, do reach the cases a one-step lag adds: a request
+    sampling a stop token after its next step was already launched (that step's token is
+    dropped), and a request preempted before its last token was read back, which then ends it
+    (WAITING -> FINISHED). Otherwise their passing would say nothing about these paths."""
+    import random
+
+    seen = {"dropped": 0, "waiting_to_finished": 0}
+    drop, transition = Request.drop_pending, Request.transition
+
+    def counting_drop(self):
+        if self.num_pending and self.state is not RequestState.ABORTED:
+            seen["dropped"] += 1
+        drop(self)
+
+    def counting_transition(self, new):
+        if self.state is RequestState.WAITING and new is RequestState.FINISHED:
+            seen["waiting_to_finished"] += 1
+        transition(self, new)
+
+    monkeypatch.setattr(Request, "drop_pending", counting_drop)
+    monkeypatch.setattr(Request, "transition", counting_transition)
+    for seed in range(10):
+        for chunk in (0, 3):
+            rng = random.Random(seed)
+            eng = _toy_engine(8, 4, max_running=16, max_prefill_tokens=48, chunked_prefill_size=chunk)
+            reqs = []
+            for step in range(2000):
+                if step < 60:
+                    for _ in range(rng.randrange(3)):
+                        n = rng.randint(1, 20)
+                        params = SamplingParams(rng.randint(1, 31 - n), frozenset({TOY_STOP}))
+                        reqs.append(eng.add_request([rng.randrange(1, TOY_VOCAB) for _ in range(n)], params))
+                elif not eng.has_unfinished:
+                    break
+                _step_checked(eng, chunk)
+            for r in reqs:
+                assert r.output_ids == _toy_generate(r.prompt_ids, r.params, r.seed)
+            _assert_no_leak(eng)
+    print(f"\n{seen}")
+    assert seen["dropped"] > 0 and seen["waiting_to_finished"] > 0
 
 
 def test_chunks_are_cached_as_they_complete():
@@ -611,7 +660,7 @@ def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk):
     st = eng.scheduler.stats
     if radix:
         assert st["first_cached"] > 0, st
-        if eng.scheduler.num_preemptions:
+        if st["re_tokens"]:  # (a preempted request whose last token was in flight is never readmitted)
             assert st["re_cached"] > 0, st  # readmitted requests find their own blocks
     else:
         assert st["first_cached"] == st["re_cached"] == 0
@@ -739,9 +788,9 @@ def _spy_positions(eng, model, monkeypatch) -> list[list[int]]:
     if graphs is not None:
         run = graphs.run
 
-        def graph_spy(ids, pos, slots, tables):
+        def graph_spy(ids, pos, slots, tables, fill=None):
             seen.append(list(pos))
-            return run(ids, pos, slots, tables)
+            return run(ids, pos, slots, tables, fill)
 
         monkeypatch.setattr(graphs, "run", graph_spy)
     return seen
@@ -855,19 +904,27 @@ def test_batched_prefill_logits_close(model, reference):
 @pytest.mark.gpu
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "attention, chunk, graph",
-    [("contiguous", None, True), ("paged", None, True), ("paged", None, False), ("paged", 0, True), ("paged", 64, True)],
-    ids=["contiguous", "paged", "paged-eager", "paged-nochunk", "paged-chunk64"],
+    "attention, chunk, graph, overlap",
+    [
+        ("contiguous", None, True, True),
+        ("paged", None, True, True),
+        ("paged", None, False, True),
+        ("paged", None, True, False),
+        ("paged", 0, True, True),
+        ("paged", 64, True, True),
+    ],
+    ids=["contiguous", "paged", "paged-eager", "paged-no-overlap", "paged-nochunk", "paged-chunk64"],
 )
 @pytest.mark.parametrize("arrival", ["all_at_once", "staggered"])
-def test_concurrent_matches_reference(arrival, attention, chunk, graph, model, reference):
+def test_concurrent_matches_reference(arrival, attention, chunk, graph, overlap, model, reference):
     """Mixed concurrent load: prefills of several prompts and decode batches of varying size.
     Paged runs with the default chunk budget (2048: mixed prefill + decode steps), without chunking
     (prefill-only and decode-only steps), and with 64-token chunks (every long prompt cut); decode
-    steps replay CUDA Graphs except in ``paged-eager``."""
+    steps replay CUDA Graphs except in ``paged-eager``, and each step is launched before the previous
+    one is read back except in ``paged-no-overlap``."""
     names = list(PROMPTS)
     schedule = {0: names} if arrival == "all_at_once" else {0: names[:2], 3: names[2:4], 7: names[4:5], 20: names[5:]}
-    eng = _engine(model, attention=attention, chunked_prefill_size=chunk, cuda_graph=graph)
+    eng = _engine(model, attention=attention, chunked_prefill_size=chunk, cuda_graph=graph, overlap=overlap)
     phases = []
     eng.logits_hook = lambda batch, logits: phases.append(batch.phase)
     reqs, step = _run(eng, reference, schedule)
@@ -968,7 +1025,8 @@ def test_abort_mid_decode(attention, model, reference):
     for k in ("short_en", "zh"):
         _check_against_reference(k, reqs[k].output_ids, reference[k][2], reference[k][3])
         _check_margins(k, model, reference[k][0], reqs[k].output_ids)
-    assert len(victim.output_ids) == 10
+    # ten tokens launched; with overlap the tenth was not read back when it was aborted
+    assert len(victim.output_ids) == (9 if eng.overlap else 10)
     _assert_no_leak(eng)
 
 
@@ -988,14 +1046,17 @@ def test_positions_contract(attention, model, reference, monkeypatch):
     names = ["short_en", "code", "zh"]
     for k in names[:2]:
         eng.add_request(reference[k][0], SamplingParams(6, STOP_IDS))
-    step = 0
+    step = launches = 0
     while eng.has_unfinished:
         if step == 2:
             eng.add_request(reference[names[2]][0], SamplingParams(6, STOP_IDS))
-        batch = eng.step()
-        assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
+        eng.step()
+        launched = eng.launched  # with overlap, step() returns the previous batch
+        if launched is not None:
+            assert seen[-1] == positions.expected(launched), f"step {step} ({launched.phase.name})"
+            launches += 1
         step += 1
-    assert len(seen) == step
+    assert len(seen) == launches
     _assert_no_leak(eng)
 
 
@@ -1028,7 +1089,11 @@ def test_shared_prefix_anchor(model, tokenizer, reference, monkeypatch):
                 reqs[k] = eng.add_request(refs[k][0], SamplingParams(refs[k][1], STOP_IDS))
         if not eng.has_unfinished and "E" not in reqs:
             reqs["E"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
-        batch = eng.step()
+        eng.step()
+        batch = eng.launched  # with overlap, step() returns the previous batch
+        if batch is None:
+            step += 1
+            continue
         assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
         if batch.phase is Phase.PREFILL:
             cached = {k: r.num_cached_tokens for k, r in reqs.items() if r in batch.requests}
@@ -1097,7 +1162,8 @@ def test_decode_graph_matches_eager(lens, model):
     import random
 
     rng = random.Random(len(lens))
-    eng = _engine(model, attention="paged", chunked_prefill_size=0)
+    # without overlap: the batch's input tokens must be known on the host to run it twice by hand
+    eng = _engine(model, attention="paged", chunked_prefill_size=0, overlap=False)
     runner = eng.runner
     reqs = [eng.add_request([rng.randrange(150_000) for _ in range(n)], SamplingParams(3)) for n in lens]
     while any(r.state is not RequestState.DECODE for r in reqs):
@@ -1127,6 +1193,71 @@ def test_decode_graph_matches_eager(lens, model):
     assert torch.equal(graph_logits.argmax(-1)[decisive], eager_logits.argmax(-1)[decisive])
     for r in reqs:
         eng.abort(r.rid)
+    _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_launch_does_not_wait_for_the_device(model, monkeypatch):
+    """With overlap, a step launches the next batch and then reads back the previous one: it must
+    not wait for the device before that read-back. A long sleep kernel is queued between two steps.
+
+    - A graph decode step launches a handful of operations: the whole step (launch, then the
+      read-back of the previous batch, which ran before the sleep) returns long before the
+      sleep ends. Without overlap (control) it waits for its own batch, behind the sleep.
+    - An eager step launches about 1500 kernels, more than the driver queues ahead of the
+      device (about 1000 on the development machine), so launching the forward pass itself
+      blocks behind any long sleep; that is queue depth, not a synchronization, and in steady
+      state only bounds how far the CPU runs ahead. For eager decode and mixed steps the check
+      is that everything before the forward pass (scheduling, inputs, planning) does not wait.
+    """
+    import time
+
+    eng = _engine(model, attention="paged", chunked_prefill_size=256)
+    reqs = [eng.add_request(list(range(1, 200 + 7 * k)), SamplingParams(200)) for k in range(4)]
+    while any(r.state is not RequestState.DECODE for r in reqs) or eng.launched.phase is not Phase.DECODE:
+        eng.step()
+    reached_forward = []
+    inner = model.forward_with
+
+    def spy(*a, **k):
+        reached_forward.append(time.perf_counter())
+        return inner(*a, **k)
+
+    monkeypatch.setattr(model, "forward_with", spy)
+    sleep_cycles = 1_500_000_000  # about 0.6 s at the 4060's 2.5 GHz
+    for case in ("graph decode", "eager decode", "mixed", "no overlap"):
+        eng.runner.use_cuda_graph = case != "eager decode"
+        eng.overlap = case != "no overlap"
+        if case == "mixed":
+            reqs.append(eng.add_request(list(range(1, 600)), SamplingParams(4)))
+        eng.step()
+        torch.cuda._sleep(sleep_cycles)
+        reached_forward.clear()
+        t = time.perf_counter()
+        eng.step()
+        elapsed = time.perf_counter() - t
+        to_forward = reached_forward[0] - t if reached_forward else None
+        torch.cuda.synchronize()
+        t = time.perf_counter()
+        torch.cuda._sleep(sleep_cycles)
+        torch.cuda.synchronize()
+        sleep_s = time.perf_counter() - t
+        print(
+            f"\n{case} ({eng.launched.phase.name}): step {elapsed * 1e3:.1f} ms, "
+            f"to the forward pass {'-' if to_forward is None else f'{to_forward * 1e3:.1f}'} ms, with a {sleep_s * 1e3:.0f} ms sleep queued"
+        )
+        if case == "graph decode":
+            assert elapsed < 0.25 * sleep_s
+        elif case == "no overlap":
+            assert elapsed > 0.8 * sleep_s
+        else:
+            assert to_forward is not None and to_forward < 0.25 * sleep_s
+            if case == "mixed":
+                assert eng.launched.phase is Phase.MIXED
+    eng.overlap = True
+    while eng.has_unfinished:
+        eng.step()
     _assert_no_leak(eng)
 
 
@@ -1168,7 +1299,8 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
         for k in arrive.get(step, []):
             ids, n, _, _ = workload64[k]
             reqs[k] = eng.add_request(ids, SamplingParams(n, STOP_IDS))
-        batch = eng.step()
+        eng.step()
+        batch = eng.launched  # with overlap, step() returns the previous batch
         if batch is not None:
             assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
         eng.runner.kv.check_invariants()

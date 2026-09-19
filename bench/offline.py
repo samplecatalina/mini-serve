@@ -144,7 +144,7 @@ def run(eng: Engine, w: Workload) -> RunResult:
         t = time.perf_counter() - t0
         if batch is None:
             continue
-        done = [len(r.output_ids) for r in batch.requests]  # after the step
+        done = [len(r.ready_ids) for r in batch.requests]  # read back by this step
         res.prefill_tokens_computed += sum(batch.extend_lens[batch.num_decode :])
         if batch.phase is Phase.PREFILL:
             res.prefill_steps += 1
@@ -183,6 +183,7 @@ ABLATIONS = {
     "radix": ("radix_on", "radix_off"),
     "chunked": ("chunk_2048", "chunk_512", "chunk_off"),
     "cuda_graph": ("graph_on", "graph_off"),
+    "overlap": ("overlap_on", "overlap_off"),
     "none": ("default",),
 }
 
@@ -195,6 +196,9 @@ def set_arm(eng: Engine, arm: str) -> None:
         kv.set_radix(False)
     elif arm == "default":
         kv.set_radix(kv.radix)  # clears the prefix cache
+    elif arm in ("overlap_on", "overlap_off"):
+        kv.set_radix(kv.radix)
+        eng.overlap = arm == "overlap_on"
     elif arm in ("graph_on", "graph_off"):
         if eng.runner.graphs is None:
             raise SystemExit("--ablate cuda_graph needs the decode graphs captured (no --disable-cuda-graph)")
@@ -326,6 +330,7 @@ def main() -> int:
                     decode_step_ms=round(statistics.mean(r.decode_step_s) * 1e3, 2) if r.decode_step_s else "",
                     mixed_step_ms=round(statistics.mean(r.mixed_step_s) * 1e3, 2) if r.mixed_step_s else "",
                     cuda_graph=eng.runner.use_cuda_graph,
+                    overlap=eng.overlap,
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
                 )

@@ -241,8 +241,9 @@ class AsyncEngine:
                     live = self._live_by_rid.get(r.rid)
                     if live is None:
                         continue
-                    new = r.output_ids[live.sent :]
-                    live.sent = len(r.output_ids)
+                    ready = r.ready_ids  # without tokens sampled but not read back yet
+                    new = ready[live.sent :]
+                    live.sent = len(ready)
                     finish = None
                     if r.state is RequestState.FINISHED:
                         finish = "stop" if r.output_ids[-1] in r.params.stop_token_ids else "length"

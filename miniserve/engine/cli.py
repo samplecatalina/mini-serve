@@ -28,6 +28,11 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="tokens per step, decodes included, with prefills cut into chunks batched with decodes; "
         "0: whole prefills in prefill-only steps (default: 2048 with paged attention)",
     )
+    g.add_argument(
+        "--disable-overlap",
+        action="store_true",
+        help="read back each step's tokens before scheduling the next (no CPU-GPU overlap)",
+    )
     g.add_argument("--disable-cuda-graph", action="store_true", help="run decode steps eagerly (no CUDA Graphs)")
     g.add_argument(
         "--cuda-graph-max-bs",
@@ -48,5 +53,6 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         radix=not args.disable_radix,
         chunked_prefill_size=args.chunked_prefill_size,
         cuda_graph=not args.disable_cuda_graph,
+        overlap=not args.disable_overlap,
         cuda_graph_max_bs=args.cuda_graph_max_bs,
     )

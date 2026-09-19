@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 import torch.nn.functional as F
 
+from miniserve.model.transfer import pinned, to_device
+
 if TYPE_CHECKING:
     from miniserve.cache.block_table import BlockTable
     from miniserve.cache.kv_pool import KVPool
@@ -105,11 +107,12 @@ class FlashInferPagedAttention:
         for t in tables:
             indices += t.blocks
             kv_indptr.append(len(indices))
-        i32 = dict(dtype=torch.int32)
-        kv_indptr_t = torch.tensor(kv_indptr, **i32)
-        indices_t = torch.tensor(indices, **i32)
-        last_t = torch.tensor([t.last_block_len for t in tables], **i32)
+        # Pinned host tensors and non-blocking copies: planning must not wait for the device.
         p = self.pool
+        i32 = dict(dtype=torch.int32, device=p.device)
+        kv_indptr_t = pinned(kv_indptr, **i32)
+        indices_t = pinned(indices, **i32)
+        last_t = pinned([t.last_block_len for t in tables], **i32)
         common = dict(
             num_qo_heads=self.num_heads,
             num_kv_heads=p.num_kv_heads,
@@ -117,10 +120,10 @@ class FlashInferPagedAttention:
             sm_scale=self.scale,
             q_data_type=p.dtype,
             kv_data_type=p.dtype,
-            non_blocking=False,
+            non_blocking=True,
         )
         if prefill:
-            qo_indptr = torch.tensor([0, *itertools.accumulate(qo_lens)], **i32)
+            qo_indptr = pinned([0, *itertools.accumulate(qo_lens)], **i32)
             self._prefill.plan(
                 qo_indptr, kv_indptr_t, indices_t, last_t, head_dim_qk=p.head_dim, causal=True, **common
             )
@@ -128,7 +131,7 @@ class FlashInferPagedAttention:
         else:
             self._decode.plan(kv_indptr_t, indices_t, last_t, head_dim=p.head_dim, **common)
             self._wrapper = self._decode
-        self._slots = torch.tensor(list(slots), dtype=torch.long, device=p.device)
+        self._slots = to_device(list(slots), torch.long, p.device)
 
     def attend(self, layer: int, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         if self._wrapper is None:

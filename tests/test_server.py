@@ -343,11 +343,11 @@ def test_engine_failure_ends_streams_and_refuses_new_requests():
         forward = ae.engine.runner.forward
         calls = []
 
-        def failing_forward(batch):
+        def failing_forward(batch, fill=None):
             calls.append(1)
             if len(calls) == 3:
                 raise RuntimeError("device lost")
-            return forward(batch)
+            return forward(batch, fill)
 
         ae.engine.runner.forward = failing_forward
         await ae.start()

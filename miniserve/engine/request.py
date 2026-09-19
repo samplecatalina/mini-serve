@@ -36,7 +36,9 @@ class RequestState(enum.Enum):
 
 
 _TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
-    RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED}),
+    # WAITING -> FINISHED: with overlap scheduling, a request preempted before its last sampled
+    # token was read back, which then turns out to end it.
+    RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED, RequestState.FINISHED}),
     # PREFILL -> WAITING: preempted between chunks of a chunked prefill.
     RequestState.PREFILL: frozenset(
         {RequestState.DECODE, RequestState.FINISHED, RequestState.ABORTED, RequestState.WAITING}
@@ -45,6 +47,10 @@ _TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     RequestState.FINISHED: frozenset(),
     RequestState.ABORTED: frozenset(),
 }
+
+
+# Output slot of a token that was sampled on the device but not read back yet (overlap scheduling).
+PLACEHOLDER = -1
 
 
 class InvalidTransition(RuntimeError):
@@ -91,6 +97,8 @@ class Request:
     num_preemptions: int = 0
     # Seed of the sampling noise; fixed when the request is submitted.
     seed: int = 0
+    # Trailing PLACEHOLDER entries of output_ids: sampled, not yet read back (overlap scheduling).
+    num_pending: int = 0
 
     def __post_init__(self):
         if not self.prompt_ids:
@@ -109,6 +117,22 @@ class Request:
     def seq_len(self) -> int:
         """Tokens a prefill of this request runs: the prompt plus any output kept across a preemption."""
         return len(self.prompt_ids) + len(self.output_ids)
+
+    @property
+    def ready_ids(self) -> list[int]:
+        """Output tokens read back so far (``output_ids`` without trailing placeholders)."""
+        return self.output_ids[: len(self.output_ids) - self.num_pending]
+
+    @property
+    def reached_max_tokens(self) -> bool:
+        """Every token this request may produce has been sampled (some maybe not read back yet)."""
+        return len(self.output_ids) >= self.params.max_new_tokens
+
+    def drop_pending(self) -> None:
+        """Forget tokens sampled after the request ended (they were launched before its end was known)."""
+        if self.num_pending:
+            del self.output_ids[-self.num_pending :]
+            self.num_pending = 0
 
     @property
     def max_len(self) -> int:

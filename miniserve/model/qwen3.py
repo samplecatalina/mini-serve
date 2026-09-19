@@ -12,12 +12,14 @@ dimension, and ``positions`` gives each token's absolute position.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
 from miniserve.model.attention import AttentionBackend, ContiguousAttention
+from miniserve.model.transfer import to_device
 
 
 @dataclass(frozen=True)
@@ -179,7 +181,7 @@ class Qwen3ForCausalLM:
         Returns logits ``[len(seq_lens), vocab]`` for the last token of each sequence.
         """
         h = self._hidden(input_ids, positions, attn, seq_lens)
-        last = torch.tensor(seq_lens, device=h.device).cumsum(0) - 1
+        last = to_device([n - 1 for n in itertools.accumulate(seq_lens)], torch.long, h.device)
         h = _rms_norm(h[last], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
         return F.linear(h, self.w["lm_head.weight"])
 

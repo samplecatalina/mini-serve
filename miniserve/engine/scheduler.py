@@ -34,7 +34,10 @@ those only the prefix cache holds, which can be evicted at any time.
 
 No deadlock: a request that could not fit in the whole pool is rejected when
 it is submitted, and the oldest running request is never preempted, so it
-always makes progress and eventually finishes.
+always makes progress and eventually finishes. With overlap scheduling, a
+request whose last token is still being read back holds its KV one step
+longer; under pressure such requests are preempted first, which costs nothing
+(they are done) and frees their blocks at once.
 
 Unlike mini-sglang, admission does not reserve KV for the full
 ``max_new_tokens`` of every request; mini-sglang does, and so never needs to
@@ -143,7 +146,7 @@ class Scheduler:
         if admitted:
             self.running.extend(admitted)
             return Batch(Phase.PREFILL, admitted)
-        decoding = [r for r in self.running if r.state is RequestState.DECODE]
+        decoding = [r for r in self.running if self._decodes(r)]
         preempted = self._make_room(decoding)
         return Batch(Phase.DECODE, decoding, preempted) if decoding else None
 
@@ -154,6 +157,8 @@ class Scheduler:
         kv = self.kv
         while self.waiting and len(self.running) + len(admitted) < self.max_running:
             req = self.waiting[0]
+            if req.num_pending:  # its last token is not read back yet; its prefill needs it
+                break
             cached = kv.acquire(req) if kv is not None else 0
             n = req.seq_len - cached
             # The first request is admitted even if it alone exceeds the budget;
@@ -185,13 +190,23 @@ class Scheduler:
         if self.kv is None:
             return preempted
         while self._decode_need(decoding) > self.kv.num_available:
-            # A single request always fits: add() rejects requests larger than the pool.
-            assert len(decoding) > 1, "a lone decoding request does not fit in the pool"
-            victim = self._pick_victim(decoding)
-            decoding.remove(victim)
+            spent = self._spent()
+            if spent:  # free victims first: they have nothing left to compute
+                victim = spent[-1]
+            else:
+                # A single request always fits: add() rejects requests larger than the pool.
+                assert len(decoding) > 1, "a lone decoding request does not fit in the pool"
+                victim = self._pick_victim(decoding)
+                decoding.remove(victim)
             self._preempt(victim)
             preempted.append(victim)
         return preempted
+
+    def _spent(self) -> list[Request]:
+        """Running requests that have sampled their last token, not yet read back (overlap
+        scheduling). They hold KV until then; preempting one costs nothing, as it will never be
+        prefilled again: it ends from the waiting queue once its token is read back."""
+        return [r for r in self.running if r.state is RequestState.DECODE and r.reached_max_tokens]
 
     # ------------------------------------------------------------------ chunked prefill
 
@@ -208,7 +223,7 @@ class Scheduler:
         budget = self.chunked_prefill_size
         rows: list[tuple[Request, int, int]] = []  # (request, start, new tokens)
         for r in self.running:
-            if r.state is RequestState.DECODE:
+            if self._decodes(r):
                 rows.append((r, r.seq_len - 1, 1))
         num_decode = len(rows)
         budget -= num_decode
@@ -220,6 +235,8 @@ class Scheduler:
                 budget -= n
         while budget > 0 and self.waiting and len(self.running) < self.max_running:
             req = self.waiting[0]
+            if req.num_pending:  # its last token is not read back yet; its prefill needs it
+                break
             cached = kv.acquire(req)
             need = self._blocks_for(req.seq_len + 1) - len(req.cache.blocks)
             if need > kv.num_available - self._outstanding(self.running):
@@ -253,7 +270,8 @@ class Scheduler:
         while self._outstanding(self.running) > self.kv.num_available:
             # A single request always fits: add() rejects requests larger than the pool.
             assert len(self.running) > 1, "a lone request does not fit in the pool"
-            victim = self._pick_victim(self.running)
+            spent = self._spent()
+            victim = spent[-1] if spent else self._pick_victim(self.running)
             self._preempt(victim)
             preempted.append(victim)
         return preempted
@@ -263,7 +281,7 @@ class Scheduler:
         decoding request, and the rest of the prefill plus one token of each prefilling one."""
         need = 0
         for r in reqs:
-            if r.state is RequestState.DECODE:
+            if Scheduler._decodes(r):
                 need += r.cache.blocks_needed(1)
             elif r.state is RequestState.PREFILL:
                 need += self._blocks_for(r.seq_len + 1) - len(r.cache.blocks)
@@ -290,7 +308,13 @@ class Scheduler:
     @staticmethod
     def _decode_need(reqs: list[Request]) -> int:
         """Blocks the next decode step of ``reqs`` would allocate."""
-        return sum(r.cache.blocks_needed(1) for r in reqs if r.state is RequestState.DECODE)
+        return sum(r.cache.blocks_needed(1) for r in reqs if Scheduler._decodes(r))
+
+    @staticmethod
+    def _decodes(r: Request) -> bool:
+        """Decoding and with tokens left to produce. (With overlap scheduling a request that has
+        sampled its last token stays running until that token is read back; it needs no more steps.)"""
+        return r.state is RequestState.DECODE and not r.reached_max_tokens
 
     def retire(self, req: Request) -> None:
         """Drop a finished or aborted request from the queues."""

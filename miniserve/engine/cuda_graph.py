@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from miniserve.model.transfer import CopyFence, pinned, to_device
+
 if TYPE_CHECKING:
     from miniserve.cache.block_table import BlockTable
     from miniserve.cache.kv_pool import KVPool
@@ -86,13 +88,16 @@ class DecodeGraphs:
         workspace: torch.Tensor,
         num_heads: int,
         scale: float,
+        fence: CopyFence,
     ):
+        """``fence``: the model runner's; marked once this step's inputs are queued for copying."""
         import flashinfer
 
         self.model = model
         self.pool = pool
         self.dummy_block = dummy_block
         self.buckets = sorted(buckets)
+        self.fence = fence
         dev = pool.device
         gmax = self.buckets[-1]
         # ids, positions, slots: one pinned staging tensor, one copy per step.
@@ -110,7 +115,7 @@ class DecodeGraphs:
             sm_scale=scale,
             q_data_type=pool.dtype,
             kv_data_type=pool.dtype,
-            non_blocking=False,
+            non_blocking=True,
         )
         tensor_cores = num_heads // pool.num_kv_heads >= 4
         self._wrappers = {
@@ -176,7 +181,9 @@ class DecodeGraphs:
         if g > b:
             s[0:2, b:g] = 0
             s[2, b:g] = pad_slot
-        self._inputs[:, :g].copy_(s[:, :g], non_blocking=True)
+        # The whole buffer: a copy out of a slice of it would go through a pageable temporary
+        # (non-contiguous), which waits for the device. Rows past g are never read by graph g.
+        self._inputs.copy_(s, non_blocking=True)
 
     def _plan(self, g: int, blocks: Sequence[Sequence[int]], last_lens: Sequence[int]) -> None:
         indptr = [0]
@@ -184,24 +191,37 @@ class DecodeGraphs:
         for bl in blocks:
             indices += bl
             indptr.append(len(indices))
-        i32 = dict(dtype=torch.int32)
+        dev = self.pool.device
+        i32 = dict(dtype=torch.int32, device=dev)
+        # FlashInfer copies ``indices`` into its buffer non-blocking only from the same device
+        # (a host tensor, even pinned, is copied synchronously), so it goes up first.
         self._wrappers[g].plan(
-            torch.tensor(indptr, **i32), torch.tensor(indices, **i32), torch.tensor(list(last_lens), **i32),
-            **self._plan_args,
+            pinned(indptr, **i32), to_device(indices, torch.int32, dev), pinned(list(last_lens), **i32), **self._plan_args
         )
 
-    def run(self, ids: Sequence[int], pos: Sequence[int], slots: Sequence[int], tables: Sequence[BlockTable]) -> torch.Tensor:
+    def run(
+        self,
+        ids: Sequence[int],
+        pos: Sequence[int],
+        slots: Sequence[int],
+        tables: Sequence[BlockTable],
+        fill: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         """Decode logits ``[B, vocab]`` for B sequences, one new token each; ``tables`` already
-        cover the new token. The returned tensor is a view of the graph's output buffer, valid
-        until the next replay."""
+        cover the new token. ``fill = (rows, tokens)``: device tensors overriding the token ids
+        of those rows (tokens sampled by the previous step, not known on the host). The returned
+        tensor is a view of the graph's output buffer, valid until the next replay."""
         b = len(tables)
         g = bucket_for(self.buckets, b)
         self._stage(ids, pos, slots, g)
+        if fill is not None:
+            self._inputs[0].index_copy_(0, *fill)
         pad = g - b
         self._plan(
             g,
             [t.blocks for t in tables] + [[self.dummy_block]] * pad,
             [t.last_block_len for t in tables] + [1] * pad,
         )
+        self.fence.mark()
         self._graphs[g].replay()
         return self._logits[g][:b]
