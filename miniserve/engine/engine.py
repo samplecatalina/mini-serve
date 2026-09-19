@@ -21,6 +21,8 @@ from miniserve.engine.request import Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase, Scheduler
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 
+DEFAULT_CHUNKED_PREFILL = 2048
+
 
 class Engine:
     def __init__(
@@ -33,9 +35,12 @@ class Engine:
         seed: int = 0,
         runner: ModelRunner | None = None,
         radix: bool = True,
+        chunked_prefill_size: int | None = None,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
+        ``chunked_prefill_size``: token budget per step with prefills cut into chunks and batched
+        with decodes; 0 disables; default 2048 with paged attention, 0 with contiguous.
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -48,8 +53,10 @@ class Engine:
                 radix=radix,
             )
         self.runner = runner
+        if chunked_prefill_size is None:
+            chunked_prefill_size = DEFAULT_CHUNKED_PREFILL if runner.kv is not None else 0
         # With a paged pool the scheduler budgets KV blocks (and acquires cached prefixes) through it.
-        self.scheduler = Scheduler(max_running, max_prefill_tokens, kv=runner.kv)
+        self.scheduler = Scheduler(max_running, max_prefill_tokens, kv=runner.kv, chunked_prefill_size=chunked_prefill_size)
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
         self._seeds = random.Random(seed)
@@ -79,23 +86,27 @@ class Engine:
         batch = self.scheduler.schedule()
         if batch is None:
             return None
-        prefill = batch.phase is Phase.PREFILL
-        if prefill and self.runner.kv is None:
+        kv = self.runner.kv
+        if batch.phase is Phase.PREFILL and kv is None:
             for r in batch.requests:
                 self.runner.allocate(r)
+        completes = batch.completes()
         logits = self.runner.forward(batch)
         if self.logits_hook is not None:
             self.logits_hook(batch, logits)
         tokens = self._read_back(self.runner.sample(batch, logits))
-        for r, tok in zip(batch.requests, tokens):
+        for r, tok, done in zip(batch.requests, tokens, completes):
+            if not done:  # a prefill chunk short of the end: nothing to sample yet
+                kv.commit(r)
+                continue
             r.output_ids.append(tok)
             if r.should_stop():
                 r.transition(RequestState.FINISHED)
                 self._retire(r)
             elif r.state is RequestState.PREFILL:
                 r.transition(RequestState.DECODE)
-                if self.runner.kv is not None:
-                    self.runner.kv.commit(r)  # later requests with this prefix can hit now
+                if kv is not None:
+                    kv.commit(r)  # later requests with this prefix can hit now
         return batch
 
     @staticmethod

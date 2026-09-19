@@ -247,7 +247,8 @@ class AsyncEngine:
                     if r.state is RequestState.FINISHED:
                         finish = "stop" if r.output_ids[-1] in r.params.stop_token_ids else "length"
                         self._forget(live)
-                    updates.append(_Update(live.stream, new, finish, live.sent))
+                    if new or finish:  # a prefill chunk short of the end produces nothing yet
+                        updates.append(_Update(live.stream, new, finish, live.sent))
                 self._publish(updates)
                 if self.step_hook is not None:
                     self.step_hook(self, batch)

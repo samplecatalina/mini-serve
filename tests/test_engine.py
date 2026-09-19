@@ -78,12 +78,18 @@ def test_preempted_request_resumes_with_its_output():
     assert Batch(Phase.PREFILL, [r]).seq_lens == [5]
 
 
+def test_preempted_between_chunks():
+    r = _req(0, 3)
+    r.transition(RequestState.PREFILL)
+    r.transition(RequestState.WAITING)  # preempted part-way through a chunked prefill
+    assert r.state is RequestState.WAITING
+
+
 @pytest.mark.parametrize(
     "path",
     [
         [RequestState.DECODE],  # must prefill first
         [RequestState.FINISHED],
-        [RequestState.PREFILL, RequestState.WAITING],  # only a decoding request can be preempted
         [RequestState.WAITING],
         [RequestState.PREFILL, RequestState.DECODE, RequestState.PREFILL],
         [RequestState.ABORTED, RequestState.PREFILL],
@@ -205,14 +211,14 @@ def _paged_scheduler(num_blocks: int, block_size: int = 4, radix: bool = False, 
 
 
 def _run_batch(batch, allocator):
-    """Stand-in for the engine step: extend each block table, emit token 0, commit prefills."""
-    if batch.phase is Phase.PREFILL:
-        for r in batch.requests:
-            r.cache.append_tokens(r.seq_len - r.num_cached_tokens)
-    else:
-        for r in batch.requests:
-            r.cache.append_tokens(1)
-    for r in batch.requests:
+    """Stand-in for the engine step: extend each block table by its rows; rows that reach the end
+    of their sequence emit token 0 (a prefill completing moves to DECODE)."""
+    done = batch.completes()
+    for r, n in zip(batch.requests, batch.extend_lens):
+        r.cache.append_tokens(n)
+    for r, d in zip(batch.requests, done):
+        if not d:
+            continue
         r.output_ids.append(0)
         if r.state is RequestState.PREFILL:
             r.transition(RequestState.DECODE)
@@ -278,6 +284,100 @@ def test_request_larger_than_pool_rejected():
     with pytest.raises(ValueError):
         s.add(_req(0, 10, 3))  # 13 tokens > 12
     s.add(_req(1, 10, 2))  # 12 fits exactly
+
+
+# --------------------------------------------------------------------------- scheduler: chunked prefill
+
+
+def _rows(batch):
+    return [(r.rid, st, n) for r, st, n in zip(batch.requests, batch.starts, batch.extend_lens)]
+
+
+def test_chunked_decode_first_then_chunks():
+    s, a = _paged_scheduler(64, chunked_prefill_size=8)
+    x = _req(0, 3, 8)
+    s.add(x)
+    b = s.schedule()
+    assert b.phase is Phase.PREFILL and _rows(b) == [(0, 0, 3)]
+    _run_batch(b, a)
+    long = _req(1, 20, 4)
+    s.add(long)
+    # x decodes (1 token), the long prompt gets the other 7 of the budget
+    b = s.schedule()
+    assert b.phase is Phase.MIXED and _rows(b) == [(0, 3, 1), (1, 0, 7)] and b.completes() == [True, False]
+    assert b.num_decode == 1
+    _run_batch(b, a)
+    assert long.state is RequestState.PREFILL and long.output_ids == [] and long.cache.num_tokens == 7
+    b = s.schedule()  # the next chunk continues where the last stopped
+    assert _rows(b) == [(0, 4, 1), (1, 7, 7)]
+    _run_batch(b, a)
+    b = s.schedule()
+    assert _rows(b) == [(0, 5, 1), (1, 14, 6)] and b.completes() == [True, True]
+    _run_batch(b, a)
+    assert long.state is RequestState.DECODE and long.output_ids == [0]
+    b = s.schedule()
+    assert b.phase is Phase.DECODE and _rows(b) == [(0, 6, 1), (1, 20, 1)]
+
+
+def test_chunked_budget_counts_decodes_and_admits_in_order():
+    s, a = _paged_scheduler(64, chunked_prefill_size=6)
+    xs = [_req(i, 2, 8) for i in range(3)]
+    for x in xs:
+        s.add(x)
+    b = s.schedule()  # three short prompts fit the budget together
+    assert _rows(b) == [(0, 0, 2), (1, 0, 2), (2, 0, 2)]
+    _run_batch(b, a)
+    y, z = _req(3, 10, 4), _req(4, 1, 4)
+    s.add(y)
+    s.add(z)
+    b = s.schedule()  # 3 decodes, 3 tokens left: a chunk of y; z waits behind it (head of line)
+    assert _rows(b) == [(0, 2, 1), (1, 2, 1), (2, 2, 1), (3, 0, 3)] and list(s.waiting) == [z]
+    assert sum(b.extend_lens) == 6
+
+
+def test_chunked_admission_reserves_whole_prefill():
+    s, a = _paged_scheduler(6, chunked_prefill_size=4)  # 6 blocks of 4 tokens
+    x = _req(0, 16, 4)  # needs ceil(17 / 4) = 5 blocks for its whole prefill + 1
+    y = _req(1, 4, 4)  # needs 2
+    s.add(x)
+    s.add(y)
+    b = s.schedule()
+    assert _rows(b) == [(0, 0, 4)]  # x admitted; y does not fit next to x's reservation
+    assert s._outstanding(s.running) <= s.kv.num_available
+    _run_batch(b, a)
+    b = s.schedule()
+    assert _rows(b) == [(0, 4, 4)] and list(s.waiting) == [y]
+
+
+def test_chunked_preempts_newest_even_mid_prefill():
+    """x decodes and grows while y, admitted later, is still being prefilled in chunks. When x's
+    next token no longer fits next to y's reservation, y (the newest) is preempted mid-prefill; its
+    computed full blocks stay in the prefix cache and are hit when it is admitted again."""
+    s, a = _paged_scheduler(8, radix=True, chunked_prefill_size=4)  # 8 blocks of 4 tokens
+    x = _req(0, 4, 28)  # max_len 32: the whole pool, alone
+    s.add(x)
+    _run_batch(s.schedule(), a)  # x: 4 tokens in 1 block, DECODE
+    y = Request(1, list(range(50, 70)), SamplingParams(4))  # 20 tokens: reserves ceil(21 / 4) = 6 blocks
+    s.add(y)
+    for step in range(4):  # x decodes 1, y prefills 3 per step
+        b = s.schedule()
+        assert _rows(b) == [(0, 4 + step, 1), (1, 3 * step, 3)] and not b.preempted
+        assert s._outstanding(s.running) <= s.kv.num_available
+        _run_batch(b, a)
+        s.kv.commit(y)  # as the engine does after a chunk
+    assert x.cache.num_tokens == 8 and y.cache.num_tokens == 12 and y.state is RequestState.PREFILL
+    # x's next token needs a 3rd block; with y's remaining reservation (6 - 3) nothing is left
+    b = s.schedule()
+    assert b.preempted == [y] and y.state is RequestState.WAITING and y.cache is None
+    assert b.phase is Phase.DECODE and _rows(b) == [(0, 8, 1)]
+    assert s.kv.tree.num_cached_blocks == 3  # y's computed chunks, now held by the tree alone
+    s.kv.check_invariants()
+    _run_batch(b, a)
+    assert list(s.waiting) == [y] and y.num_preemptions == 1
+    # When y is admitted again it resumes from the cached 12 tokens.
+    y_cached = s.kv.acquire(y)
+    assert y_cached == 12
+    s.kv.abandon(y)
 
 
 def test_abandoned_admission_leaves_no_trace():
@@ -376,6 +476,16 @@ class _ToyModel:
         return torch.stack(rows)
 
 
+def _step_checked(eng: Engine, chunk: int):
+    """One step plus the invariants every step must keep: cache and allocator consistent and the
+    step within its token budget. (A budget error shows up as OutOfBlocks inside the step.)"""
+    batch = eng.step()
+    eng.runner.kv.check_invariants()
+    if batch is not None and chunk:
+        assert sum(batch.extend_lens) <= chunk, (batch.phase, batch.extend_lens)
+    return batch
+
+
 def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     runner = ModelRunner.__new__(ModelRunner)  # the real runner logic, without a GPU model
     runner.model = runner.flashinfer = _ToyModel()
@@ -387,16 +497,17 @@ def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     return Engine(None, runner=runner, **kw)
 
 
+@pytest.mark.parametrize("chunk", [0, 3, 2048])
 @pytest.mark.parametrize("num_blocks", [8, 16, 64])
 @pytest.mark.parametrize("seed", range(10))
-def test_simulated_load_under_kv_pressure(seed, num_blocks):
+def test_simulated_load_under_kv_pressure(seed, num_blocks, chunk):
     """Random arrivals, lengths and sampling settings in a small pool: no OutOfBlocks, no stall,
     and every output (greedy or sampled) equals the request run alone, preempted or not."""
     import random
 
     rng = random.Random(seed)
     block_size = 4
-    eng = _toy_engine(num_blocks, block_size, max_running=16, max_prefill_tokens=48)
+    eng = _toy_engine(num_blocks, block_size, max_running=16, max_prefill_tokens=48, chunked_prefill_size=chunk)
     cap = num_blocks * block_size
     arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
     for _ in range(40):
@@ -410,8 +521,7 @@ def test_simulated_load_under_kv_pressure(seed, num_blocks):
     while eng.has_unfinished or step < 60:
         for prompt, params in arrivals.get(step, []):
             reqs.append(eng.add_request(prompt, params))
-        eng.step()
-        eng.runner.kv.check_invariants()
+        _step_checked(eng, chunk)
         step += 1
         assert step < 20_000, "no progress"
     for r in reqs:
@@ -423,10 +533,11 @@ def test_simulated_load_under_kv_pressure(seed, num_blocks):
     print(f"\nseed {seed}, {num_blocks} blocks: {step} steps, {eng.scheduler.num_preemptions} preemptions")
 
 
+@pytest.mark.parametrize("chunk", [0, 5, 2048])
 @pytest.mark.parametrize("radix", [True, False])
 @pytest.mark.parametrize("num_blocks", [12, 24, 96])
 @pytest.mark.parametrize("seed", range(8))
-def test_simulated_shared_prefixes(seed, num_blocks, radix):
+def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk):
     """Requests built from a few shared prefixes, in a pool small enough to preempt and evict.
 
     The toy model reads every sequence's history back from the KV store through
@@ -438,7 +549,7 @@ def test_simulated_shared_prefixes(seed, num_blocks, radix):
 
     rng = random.Random(seed)
     block_size = 4
-    eng = _toy_engine(num_blocks, block_size, max_running=8, max_prefill_tokens=40, radix=radix)
+    eng = _toy_engine(num_blocks, block_size, max_running=8, max_prefill_tokens=40, radix=radix, chunked_prefill_size=chunk)
     cap = num_blocks * block_size
     prefixes = [[rng.randrange(1, TOY_VOCAB) for _ in range(rng.randint(4, 17))] for _ in range(3)]
     arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
@@ -454,8 +565,7 @@ def test_simulated_shared_prefixes(seed, num_blocks, radix):
     while eng.has_unfinished or step < 40:
         for prompt, params in arrivals.get(step, []):
             reqs.append(eng.add_request(prompt, params))
-        eng.step()
-        eng.runner.kv.check_invariants()
+        _step_checked(eng, chunk)
         step += 1
         assert step < 20_000, "no progress"
     for r in reqs:
@@ -542,12 +652,27 @@ def _check_margins(name, model, prompt, tokens) -> float:
     return m[worst]
 
 
-def _expected_positions(batch) -> list[int]:
-    """Positions fed in ``batch``, computed after the step (each request holds one more output token)."""
-    if batch.phase is Phase.PREFILL:  # prompt + the output kept across a preemption, after the cached prefix
-        return [p for r in batch.requests for p in range(r.num_cached_tokens, r.seq_len - 1)]
-    # the token just fed was the previous last output
-    return [r.seq_len - 2 for r in batch.requests]
+class _Positions:
+    """Expected positions of each step, from a KV frontier the test keeps itself.
+
+    A request's frontier is how many of its tokens have KV. A row continues from it: a decode
+    row, or the next chunk of a chunked prefill. Only a row that (re)admits a request starts
+    from the request's cached prefix; preemption forgets the frontier. Deriving positions this
+    way, rather than from the batch's own ``starts``, catches a scheduler that resumes a chunk
+    or a decode at the wrong position."""
+
+    def __init__(self):
+        self.frontier: dict[int, int] = {}
+
+    def expected(self, batch) -> list[int]:
+        for r in batch.preempted:
+            self.frontier.pop(r.rid, None)
+        out = []
+        for r, n in zip(batch.requests, batch.extend_lens):
+            start = self.frontier.get(r.rid, r.num_cached_tokens)
+            out += range(start, start + n)
+            self.frontier[r.rid] = start + n
+        return out
 
 
 def _assert_no_leak(eng):
@@ -669,16 +794,64 @@ def test_batched_prefill_logits_close(model, reference):
 
 @pytest.mark.gpu
 @pytest.mark.slow
-@pytest.mark.parametrize("attention", ATTENTION)
+@pytest.mark.parametrize(
+    "attention, chunk",
+    [("contiguous", None), ("paged", None), ("paged", 0), ("paged", 64)],
+    ids=["contiguous", "paged", "paged-nochunk", "paged-chunk64"],
+)
 @pytest.mark.parametrize("arrival", ["all_at_once", "staggered"])
-def test_concurrent_matches_reference(arrival, attention, model, reference):
-    """Mixed concurrent load: prefills of several prompts and decode batches of varying size."""
+def test_concurrent_matches_reference(arrival, attention, chunk, model, reference):
+    """Mixed concurrent load: prefills of several prompts and decode batches of varying size.
+    Paged runs with the default chunk budget (2048: mixed prefill + decode steps), without chunking
+    (prefill-only and decode-only steps), and with 64-token chunks (every long prompt cut)."""
     names = list(PROMPTS)
     schedule = {0: names} if arrival == "all_at_once" else {0: names[:2], 3: names[2:4], 7: names[4:5], 20: names[5:]}
-    eng = _engine(model, attention=attention)
+    eng = _engine(model, attention=attention, chunked_prefill_size=chunk)
+    phases = []
+    eng.logits_hook = lambda batch, logits: phases.append(batch.phase)
     reqs, step = _run(eng, reference, schedule)
-    _check_all(f"{attention} {arrival}, {step} steps", model, reference, reqs)
+    _check_all(f"{attention} chunk {chunk} {arrival}, {step} steps, phases {sorted({p.name for p in phases})}", model, reference, reqs)
+    if chunk == 64 and arrival == "staggered":
+        assert Phase.MIXED in phases
     _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_chunk_boundaries_match_whole_prefill(model, reference):
+    """The long prompt prefilled in 64-token chunks (9 chunks, boundaries mid-block and on block
+    edges alike) against one prefill on the reference path: last-position logits close, the same
+    argmax where the reference is decisive, and greedy output passing the anchor."""
+    ids, n, ref, gaps = reference["long_en"]
+    chunks, logits_at_end = [], []
+
+    def hook(batch, logits):
+        chunks.append(batch.extend_lens[0])
+        if batch.completes()[0] and not logits_at_end:
+            logits_at_end.append(logits[0].float().clone())
+
+    for size in (64, 100):
+        chunks.clear()
+        logits_at_end.clear()
+        eng = _engine(model, attention="paged", chunked_prefill_size=size)
+        eng.logits_hook = hook
+        r = eng.add_request(ids, SamplingParams(n, STOP_IDS))
+        while eng.has_unfinished:
+            eng.step()
+        prefill_chunks = chunks[: -(len(r.output_ids) - 1) or None]
+        assert prefill_chunks == [size] * (len(ids) // size) + ([len(ids) % size] if len(ids) % size else [])
+        dev = model.device
+        whole = model.forward(torch.tensor(ids, device=dev), torch.arange(len(ids), device=dev), model.new_cache(len(ids))).float()
+        diff = (logits_at_end[0] - whole).abs().max().item()
+        top2 = torch.topk(whole, 2).values
+        print(f"\nchunk {size}: {len(prefill_chunks)} chunks, last-position max|d| vs whole prefill {diff:.4f}")
+        assert diff < 1.0, diff
+        if top2[0] - top2[1] > EPS:
+            assert logits_at_end[0].argmax() == whole.argmax()
+        pos = _check_against_reference(f"chunk {size}", r.output_ids, ref, gaps)
+        _check_margins(f"chunk {size}", model, ids, r.output_ids)
+        print(f"chunk {size}: diverged at {pos}")
+        _assert_no_leak(eng)
 
 
 @pytest.mark.gpu
@@ -757,6 +930,7 @@ def test_positions_contract(attention, model, reference, monkeypatch):
 
     eng = _engine(model, attention=attention)  # before the spy: paged construction runs a profiling pass
     monkeypatch.setattr(model, "forward_with", spy)
+    positions = _Positions()
     names = ["short_en", "code", "zh"]
     for k in names[:2]:
         eng.add_request(reference[k][0], SamplingParams(6, STOP_IDS))
@@ -765,7 +939,7 @@ def test_positions_contract(attention, model, reference, monkeypatch):
         if step == 2:
             eng.add_request(reference[names[2]][0], SamplingParams(6, STOP_IDS))
         batch = eng.step()
-        assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
+        assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
         step += 1
     assert len(seen) == step
     _assert_no_leak(eng)
@@ -798,6 +972,7 @@ def test_shared_prefix_anchor(model, tokenizer, reference, monkeypatch):
 
     eng = _engine(model, attention="paged")
     monkeypatch.setattr(model, "forward_with", spy)
+    positions = _Positions()
     reqs, step = {}, 0
     reqs["A"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
     while eng.has_unfinished or "E" not in reqs:
@@ -807,7 +982,7 @@ def test_shared_prefix_anchor(model, tokenizer, reference, monkeypatch):
         if not eng.has_unfinished and "E" not in reqs:
             reqs["E"] = eng.add_request(base, SamplingParams(n, STOP_IDS))
         batch = eng.step()
-        assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
+        assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
         if batch.phase is Phase.PREFILL:
             cached = {k: r.num_cached_tokens for k, r in reqs.items() if r in batch.requests}
             print(f"step {step}: prefill cached tokens {cached}")
@@ -899,6 +1074,7 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
 
     eng = _engine(model, attention="paged", kv_pool_tokens=pool_tokens)
     monkeypatch.setattr(model, "forward_with", spy)
+    positions = _Positions()
     names = sorted(workload64)
     # staggered: bursts of 8 every 5 steps, so requests join while others are mid-decode
     arrive = {0: names} if arrival == "all_at_once" else {5 * i: names[8 * i : 8 * i + 8] for i in range(8)}
@@ -909,7 +1085,7 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
             reqs[k] = eng.add_request(ids, SamplingParams(n, STOP_IDS))
         batch = eng.step()
         if batch is not None:
-            assert seen[-1] == _expected_positions(batch), f"step {step} ({batch.phase.name})"
+            assert seen[-1] == positions.expected(batch), f"step {step} ({batch.phase.name})"
         eng.runner.kv.check_invariants()
         step += 1
         assert step < 20_000, "no progress"

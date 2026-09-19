@@ -56,25 +56,35 @@ RESULTS_DIR = "results/rtx4060-laptop"
 @dataclass
 class Workload:
     prompts: list[list[int]]
-    output_len: int
+    output_lens: list[int]
     arrivals: list[float]  # seconds after start, sorted
+    long: list[bool]  # per request: one of the long prompts (``mixed``)
 
 
 def make_workload(args, seed: int) -> Workload:
     """``shared``: groups of requests sharing a long random prefix, each with its own suffix, in
-    random order. ``unique``: the same lengths with nothing shared."""
+    random order. ``unique``: the same lengths with nothing shared. ``mixed``: short requests
+    (``--short-len`` prompt, ``--output-len`` output) with ``--num-long`` long prompts
+    (``--long-len``, ``--long-output-len``) at random places in the arrival order."""
     rng = random.Random(seed)
     n = args.groups * args.per_group
 
     def rand(k):
         return [rng.randrange(VOCAB_LIMIT) for _ in range(k)]
 
+    long = [False] * n
+    output_lens = [args.output_len] * n
     if args.workload == "shared":
         prefixes = [rand(args.prefix_len) for _ in range(args.groups)]
         prompts = [prefixes[g] + rand(args.suffix_len) for g in range(args.groups) for _ in range(args.per_group)]
         rng.shuffle(prompts)
     elif args.workload == "unique":
         prompts = [rand(args.prefix_len + args.suffix_len) for _ in range(n)]
+    elif args.workload == "mixed":
+        long_at = set(rng.sample(range(n), args.num_long))
+        long = [i in long_at for i in range(n)]
+        prompts = [rand(args.long_len if lg else args.short_len) for lg in long]
+        output_lens = [args.long_output_len if lg else args.output_len for lg in long]
     else:
         raise ValueError(args.workload)
     if args.arrival_rate > 0:
@@ -84,7 +94,7 @@ def make_workload(args, seed: int) -> Workload:
             t += rng.expovariate(args.arrival_rate)
     else:
         arrivals = [0.0] * n
-    return Workload(prompts, args.output_len, arrivals)
+    return Workload(prompts, output_lens, arrivals, long)
 
 
 # --------------------------------------------------------------------------- one run
@@ -94,17 +104,19 @@ def make_workload(args, seed: int) -> Workload:
 class RunResult:
     wall_s: float
     ttft: list[float] = field(default_factory=list)
+    ttft_long: list[float] = field(default_factory=list)
+    ttft_short: list[float] = field(default_factory=list)
     itl: list[float] = field(default_factory=list)
     output_tokens: int = 0
     prefill_tokens_computed: int = 0
     prefill_steps: int = 0
     decode_steps: int = 0
+    mixed_steps: int = 0
     decode_batch_sum: int = 0
     span_s: float = 0.0
 
 
 def run(eng: Engine, w: Workload) -> RunResult:
-    params = SamplingParams(w.output_len)  # no stop tokens: exactly output_len tokens each
     n = len(w.prompts)
     token_times: list[list[float]] = [[] for _ in range(n)]
     req_index: dict[int, int] = {}
@@ -114,7 +126,8 @@ def run(eng: Engine, w: Workload) -> RunResult:
     while i < n or eng.has_unfinished:
         now = time.perf_counter() - t0
         while i < n and w.arrivals[i] <= now:
-            req_index[eng.add_request(w.prompts[i], params).rid] = i
+            # no stop tokens: exactly the requested number of tokens each
+            req_index[eng.add_request(w.prompts[i], SamplingParams(w.output_lens[i])).rid] = i
             i += 1
         if not eng.has_unfinished:
             time.sleep(max(0.0, w.arrivals[i] - (time.perf_counter() - t0)))
@@ -127,20 +140,25 @@ def run(eng: Engine, w: Workload) -> RunResult:
         t = time.perf_counter() - t0
         if batch is None:
             continue
+        done = [len(r.output_ids) for r in batch.requests]  # after the step
+        res.prefill_tokens_computed += sum(batch.extend_lens[batch.num_decode :])
         if batch.phase is Phase.PREFILL:
             res.prefill_steps += 1
-            # After the step each request holds one more token than the prefill ran.
-            res.prefill_tokens_computed += sum(r.seq_len - 1 - r.num_cached_tokens for r in batch.requests)
+        elif batch.phase is Phase.MIXED:
+            res.mixed_steps += 1
         else:
             res.decode_steps += 1
             res.decode_batch_sum += len(batch.requests)
-        for r in batch.requests:
-            token_times[req_index[r.rid]].append(t)
+        for r, k in zip(batch.requests, done):
+            times = token_times[req_index[r.rid]]
+            if k > len(times):  # this step gave the request a token (a prefill chunk may not)
+                times.append(t)
     for k, times in enumerate(token_times):
-        assert len(times) == w.output_len, f"request {k}: {len(times)} tokens"
+        assert len(times) == w.output_lens[k], f"request {k}: {len(times)} tokens"
         res.ttft.append(times[0] - w.arrivals[k])
+        (res.ttft_long if w.long[k] else res.ttft_short).append(res.ttft[-1])
         res.itl += [b - a for a, b in zip(times, times[1:])]
-    res.output_tokens = n * w.output_len
+    res.output_tokens = sum(w.output_lens)
     res.span_s = max(t[-1] for t in token_times) - min(w.arrivals)
     res.wall_s = time.perf_counter() - t0
     return res
@@ -155,7 +173,11 @@ def pct(xs: list[float], q: float) -> float:
 
 # --------------------------------------------------------------------------- arms
 
-ABLATIONS = {"radix": ("radix_on", "radix_off"), "none": ("default",)}
+ABLATIONS = {
+    "radix": ("radix_on", "radix_off"),
+    "chunked": ("chunk_2048", "chunk_512", "chunk_off"),
+    "none": ("default",),
+}
 
 
 def set_arm(eng: Engine, arm: str) -> None:
@@ -166,18 +188,19 @@ def set_arm(eng: Engine, arm: str) -> None:
         kv.set_radix(False)
     elif arm == "default":
         kv.set_radix(kv.radix)  # clears the prefix cache
+    elif arm.startswith("chunk_"):
+        kv.set_radix(kv.radix)
+        eng.scheduler.chunked_prefill_size = 0 if arm == "chunk_off" else int(arm.removeprefix("chunk_"))
     else:
         raise ValueError(arm)
 
 
 def abba(arms: tuple[str, ...], rounds: int) -> list[str]:
-    """A B B A A B ... : each arm ``rounds`` times, neither always first."""
-    if len(arms) == 1:
-        return list(arms) * rounds
-    a, b = arms
+    """A B B A A B ... (A B C C B A ... for three arms): each arm ``rounds`` times, alternating
+    direction so that no arm always runs first or last."""
     order = []
     for k in range(rounds):
-        order += [a, b] if k % 2 == 0 else [b, a]
+        order += list(arms) if k % 2 == 0 else list(reversed(arms))
     return order
 
 
@@ -188,12 +211,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_engine_args(ap)
     g = ap.add_argument_group("benchmark")
-    g.add_argument("--workload", choices=["shared", "unique"], required=True)
+    g.add_argument("--workload", choices=["shared", "unique", "mixed"], required=True)
     g.add_argument("--groups", type=int, default=8)
     g.add_argument("--per-group", type=int, default=8)
     g.add_argument("--prefix-len", type=int, default=1024)
     g.add_argument("--suffix-len", type=int, default=64)
     g.add_argument("--output-len", type=int, default=64)
+    g.add_argument("--num-long", type=int, default=8, help="mixed: long prompts among the requests")
+    g.add_argument("--long-len", type=int, default=3072)
+    g.add_argument("--long-output-len", type=int, default=16)
+    g.add_argument("--short-len", type=int, default=256)
     g.add_argument("--arrival-rate", type=float, default=0.0, help="requests/s (Poisson); 0: all at once")
     g.add_argument("--workload-seed", type=int, default=0)
     g.add_argument("--ablate", choices=sorted(ABLATIONS), default="none")
@@ -255,13 +282,16 @@ def main() -> int:
                     workload=args.workload,
                     arrival_rate=args.arrival_rate,
                     requests=len(w.prompts),
-                    prompt_len=args.prefix_len + args.suffix_len,
-                    output_len=args.output_len,
+                    prompt_tokens=sum(len(p) for p in w.prompts),
+                    output_tokens=r.output_tokens,
                     kv_pool_tokens=eng.runner.allocator.num_blocks * eng.runner.allocator.block_size,
                     ttft_p50_ms=round(pct(r.ttft, 50) * 1e3, 2),
                     ttft_p95_ms=round(pct(r.ttft, 95) * 1e3, 2),
+                    ttft_long_p50_ms=round(pct(r.ttft_long, 50) * 1e3, 2) if r.ttft_long else "",
+                    ttft_short_p50_ms=round(pct(r.ttft_short, 50) * 1e3, 2) if r.ttft_short else "",
                     itl_p50_ms=round(pct(r.itl, 50) * 1e3, 2),
                     itl_p99_ms=round(pct(r.itl, 99) * 1e3, 2),
+                    itl_max_ms=round(max(r.itl) * 1e3, 2),
                     output_tok_s=round(r.output_tokens / r.span_s, 1),
                     span_s=round(r.span_s, 3),
                     prefill_tokens_computed=r.prefill_tokens_computed,
@@ -270,6 +300,8 @@ def main() -> int:
                     preemptions=eng.scheduler.num_preemptions - preempt0,
                     prefill_steps=r.prefill_steps,
                     decode_steps=r.decode_steps,
+                    mixed_steps=r.mixed_steps,
+                    chunked_prefill_size=eng.scheduler.chunked_prefill_size,
                     mean_decode_batch=round(r.decode_batch_sum / max(1, r.decode_steps), 2),
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
@@ -301,15 +333,19 @@ def main() -> int:
 
 
 def print_summary(rows: list[dict], arms: tuple[str, ...]) -> None:
-    keys = ["ttft_p50_ms", "ttft_p95_ms", "itl_p50_ms", "itl_p99_ms", "output_tok_s", "prefill_tokens_computed", "hit_rate", "preemptions"]
+    keys = [
+        "ttft_p50_ms", "ttft_p95_ms", "ttft_long_p50_ms", "itl_p50_ms", "itl_p99_ms", "itl_max_ms",
+        "output_tok_s", "prefill_tokens_computed", "hit_rate", "preemptions",
+    ]
+    keys = [k for k in keys if all(r[k] != "" for r in rows)]
     med = {a: {k: statistics.median(r[k] for r in rows if r["arm"] == a) for k in keys} for a in arms}
     print("\nmedian per arm:")
     for a in arms:
         print(f"  {a}: " + ", ".join(f"{k}={med[a][k]}" for k in keys))
-    if len(arms) == 2:
-        a, b = arms
-        print(f"  {a} vs {b}: " + ", ".join(
-            f"{k} {100 * (med[a][k] / med[b][k] - 1):+.1f}%" for k in keys if med[b][k]
+    base = arms[-1]  # the last arm is the baseline (feature off)
+    for a in arms[:-1]:
+        print(f"  {a} vs {base}: " + ", ".join(
+            f"{k} {100 * (med[a][k] / med[base][k] - 1):+.1f}%" for k in keys if med[base][k]
         ))
 
 

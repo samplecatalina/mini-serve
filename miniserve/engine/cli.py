@@ -21,6 +21,13 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--seed", type=int, default=0, help="seeds sampling for requests that bring no seed of their own")
     g.add_argument("--disable-radix", action="store_true", help="no prefix cache: every prefill computes all its tokens")
+    g.add_argument(
+        "--chunked-prefill-size",
+        type=int,
+        default=None,
+        help="tokens per step, decodes included, with prefills cut into chunks batched with decodes; "
+        "0: whole prefills in prefill-only steps (default: 2048 with paged attention)",
+    )
 
 
 def engine_kwargs(args: argparse.Namespace) -> dict:
@@ -31,4 +38,5 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         kv_pool_tokens=args.kv_pool_tokens,
         seed=args.seed,
         radix=not args.disable_radix,
+        chunked_prefill_size=args.chunked_prefill_size,
     )

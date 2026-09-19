@@ -29,6 +29,16 @@ from miniserve.model.qwen3 import Qwen3ForCausalLM
 ATTENTION_MODES = ("paged", "contiguous")
 
 
+def _tokens(req: Request, start: int, n: int) -> list[int]:
+    """Tokens ``start .. start + n`` of ``prompt + output``, without concatenating the two."""
+    p = len(req.prompt_ids)
+    if start >= p:
+        return req.output_ids[start - p : start - p + n]
+    if start + n <= p:
+        return req.prompt_ids[start : start + n]
+    return req.prompt_ids[start:] + req.output_ids[: start + n - p]
+
+
 class ModelRunner:
     def __init__(
         self,
@@ -146,19 +156,20 @@ class ModelRunner:
 
     def forward(self, batch: Batch) -> torch.Tensor:
         """Logits ``[len(batch.requests), vocab]`` for the last token of each request."""
-        prefill = batch.phase is Phase.PREFILL
+        # Any row with more than one new token needs the prefill kernel; decode rows of a mixed
+        # batch are causal rows of length 1 to it.
+        prefill = batch.phase is not Phase.DECODE
         ids: list[int] = []
         pos: list[int] = []
-        for r in batch.requests:
-            if prefill:  # prompt + output (a preempted request resumes), after the cached prefix
-                ids += (r.prompt_ids + r.output_ids)[r.num_cached_tokens :]
-                pos += range(r.num_cached_tokens, r.seq_len)
-            else:
-                ids.append(r.output_ids[-1])
-                pos.append(len(r.prompt_ids) + len(r.output_ids) - 1)
+        for r, start, n in zip(batch.requests, batch.starts, batch.extend_lens):
+            # prompt + output (a preempted request resumes), from the first token without KV
+            ids += _tokens(r, start, n)
+            pos += range(start, start + n)
         seq_lens = batch.seq_lens
         caches = [r.cache for r in batch.requests]
         if self.attention == "paged":
+            if any(t.num_tokens != s for t, s in zip(caches, batch.starts)):
+                raise RuntimeError("batch starts disagree with the block tables")
             self._reserve(caches, seq_lens)
             slots = [t.slot(p) for t, n in zip(caches, seq_lens) for p in range(t.num_tokens - n, t.num_tokens)]
             self.flashinfer.plan(prefill, seq_lens, caches, slots)

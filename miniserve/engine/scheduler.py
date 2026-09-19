@@ -1,9 +1,19 @@
 """Batch assembly: which requests run in the next step.
 
-Policy (same as mini-sglang's default): prefill first. If requests are waiting
-and there is room, the next batch admits waiting requests in arrival order
-until the prefill token budget is spent; otherwise every running request
-decodes one token. A batch holds a single phase.
+Two policies:
+
+- Without chunked prefill (same as mini-sglang's default): prefill first. If
+  requests are waiting and there is room, the next batch admits waiting
+  requests in arrival order until the prefill token budget is spent;
+  otherwise every running request decodes one token. A batch holds a single
+  phase, so a long prefill stalls every decoding request for its duration.
+- With chunked prefill (``chunked_prefill_size`` tokens per step): decode
+  first. Every decoding request gets its token; the rest of the step's token
+  budget goes to prefill chunks, so a long prompt is prefilled over several
+  steps alongside the decodes, and no step runs more than the budget.
+  mini-sglang also cuts prefills into chunks, but keeps prefill-only batches
+  ahead of decode, so its chunks bound the step size without letting decodes
+  through.
 
 With a paged KV pool (a ``KVCacheManager`` is given), the scheduler also
 keeps the batch within the pool. "Available" blocks are the free ones plus
@@ -43,8 +53,9 @@ from miniserve.engine.request import Request, RequestState
 
 
 class Phase(enum.Enum):
-    PREFILL = "prefill"
-    DECODE = "decode"
+    PREFILL = "prefill"  # prefill rows only (whole prompts, or chunks of them)
+    DECODE = "decode"  # one token per request
+    MIXED = "mixed"  # decode rows and prefill chunks in one pass (chunked prefill)
 
 
 @dataclass
@@ -53,13 +64,37 @@ class Batch:
     requests: list[Request]
     # Requests preempted while this batch was formed (already back in the waiting queue).
     preempted: list[Request] = field(default_factory=list)
+    # Per request: tokens whose KV exists before this step, and new tokens this step.
+    # Defaults: a whole prefill after the cached prefix, or one decode token.
+    starts: list[int] | None = None
+    extend_lens: list[int] | None = None
+    # Rows ``[0, num_decode)`` are decode rows (one token each); the rest are prefill rows.
+    num_decode: int | None = None
+
+    def __post_init__(self):
+        if self.num_decode is None:
+            if self.phase is Phase.MIXED:
+                raise ValueError("a mixed batch needs num_decode")
+            self.num_decode = len(self.requests) if self.phase is Phase.DECODE else 0
+        if self.starts is None:
+            if self.phase is Phase.PREFILL:
+                self.starts = [r.num_cached_tokens for r in self.requests]
+                self.extend_lens = [r.seq_len - r.num_cached_tokens for r in self.requests]
+            elif self.phase is Phase.DECODE:
+                self.starts = [r.seq_len - 1 for r in self.requests]
+                self.extend_lens = [1] * len(self.requests)
+            else:
+                raise ValueError("a mixed batch needs explicit starts and extend_lens")
 
     @property
     def seq_lens(self) -> list[int]:
         """New tokens each request contributes to this step's forward pass."""
-        if self.phase is Phase.PREFILL:
-            return [r.seq_len - r.num_cached_tokens for r in self.requests]
-        return [1] * len(self.requests)
+        return self.extend_lens
+
+    def completes(self) -> list[bool]:
+        """Which rows reach the end of their sequence this step, and so sample a token.
+        (A prefill chunk that stops short does not.) Valid until the step appends tokens."""
+        return [s + n == r.seq_len for r, s, n in zip(self.requests, self.starts, self.extend_lens)]
 
 
 class Scheduler:
@@ -68,10 +103,18 @@ class Scheduler:
         max_running: int = 64,
         max_prefill_tokens: int = 8192,
         kv: KVCacheManager | None = None,
+        chunked_prefill_size: int = 0,
     ):
-        """``kv``: the paged KV pool to budget against, with its prefix cache (None: no KV budget)."""
+        """``kv``: the paged KV pool to budget against, with its prefix cache (None: no KV budget).
+        ``chunked_prefill_size``: tokens per step, decode rows included, with prefills cut into
+        chunks and batched with decodes; 0 keeps whole prefills in prefill-only batches."""
         if max_running < 1 or max_prefill_tokens < 1:
             raise ValueError("max_running and max_prefill_tokens must be positive")
+        if chunked_prefill_size < 0:
+            raise ValueError(f"chunked_prefill_size must be >= 0, got {chunked_prefill_size}")
+        if chunked_prefill_size and kv is None:
+            raise ValueError("chunked prefill needs a paged KV pool")
+        self.chunked_prefill_size = chunked_prefill_size
         self.max_running = max_running
         self.max_prefill_tokens = max_prefill_tokens
         self.kv = kv
@@ -93,7 +136,9 @@ class Scheduler:
         self.waiting.append(req)
 
     def schedule(self) -> Batch | None:
-        """Pick the next batch; moves admitted requests WAITING -> PREFILL and preempted ones DECODE -> WAITING."""
+        """Pick the next batch; moves admitted requests WAITING -> PREFILL and preempted ones back to WAITING."""
+        if self.chunked_prefill_size:
+            return self._schedule_chunked()
         admitted = self._admit()
         if admitted:
             self.running.extend(admitted)
@@ -147,6 +192,84 @@ class Scheduler:
             self._preempt(victim)
             preempted.append(victim)
         return preempted
+
+    # ------------------------------------------------------------------ chunked prefill
+
+    def _schedule_chunked(self) -> Batch | None:
+        """Decode first: every decoding request gets its token, then the rest of the step's token
+        budget goes to prefill chunks, first of requests already part-way through their prefill
+        (in admission order), then of newly admitted ones (in arrival order).
+
+        Admission reserves blocks for the whole prefill plus one token, as without chunking;
+        chunks allocate them step by step. So the pool always holds what every running request
+        still needs for its next token or the rest of its prefill (``_outstanding``)."""
+        kv = self.kv
+        preempted = self._make_room_chunked()
+        budget = self.chunked_prefill_size
+        rows: list[tuple[Request, int, int]] = []  # (request, start, new tokens)
+        for r in self.running:
+            if r.state is RequestState.DECODE:
+                rows.append((r, r.seq_len - 1, 1))
+        num_decode = len(rows)
+        budget -= num_decode
+        for r in self.running:
+            if r.state is RequestState.PREFILL and budget > 0:
+                start = r.cache.num_tokens
+                n = min(r.seq_len - start, budget)
+                rows.append((r, start, n))
+                budget -= n
+        while budget > 0 and self.waiting and len(self.running) < self.max_running:
+            req = self.waiting[0]
+            cached = kv.acquire(req)
+            need = self._blocks_for(req.seq_len + 1) - len(req.cache.blocks)
+            if need > kv.num_available - self._outstanding(self.running):
+                kv.abandon(req)
+                break
+            self.waiting.popleft()
+            req.transition(RequestState.PREFILL)
+            self.running.append(req)
+            first = req.num_preemptions == 0
+            self.stats["first_tokens" if first else "re_tokens"] += req.seq_len
+            self.stats["first_cached" if first else "re_cached"] += cached
+            n = min(req.seq_len - cached, budget)
+            rows.append((req, cached, n))
+            budget -= n
+        if not rows:
+            return None
+        phase = Phase.DECODE if num_decode == len(rows) else Phase.PREFILL if num_decode == 0 else Phase.MIXED
+        return Batch(
+            phase,
+            [r for r, _, _ in rows],
+            preempted,
+            starts=[s for _, s, _ in rows],
+            extend_lens=[n for _, _, n in rows],
+            num_decode=num_decode,
+        )
+
+    def _make_room_chunked(self) -> list[Request]:
+        """Preempt the most recently admitted requests (decoding or part-way through a chunked
+        prefill) until what the running requests still need fits in the available blocks."""
+        preempted: list[Request] = []
+        while self._outstanding(self.running) > self.kv.num_available:
+            # A single request always fits: add() rejects requests larger than the pool.
+            assert len(self.running) > 1, "a lone request does not fit in the pool"
+            victim = self._pick_victim(self.running)
+            self._preempt(victim)
+            preempted.append(victim)
+        return preempted
+
+    def _outstanding(self, reqs: list[Request]) -> int:
+        """Blocks ``reqs`` may still allocate before any of them finishes: the next token of each
+        decoding request, and the rest of the prefill plus one token of each prefilling one."""
+        need = 0
+        for r in reqs:
+            if r.state is RequestState.DECODE:
+                need += r.cache.blocks_needed(1)
+            elif r.state is RequestState.PREFILL:
+                need += self._blocks_for(r.seq_len + 1) - len(r.cache.blocks)
+        return need
+
+    # ------------------------------------------------------------------ preemption
 
     def _pick_victim(self, decoding: list[Request]) -> Request:
         """The most recently admitted request. Never the oldest, which guarantees progress."""

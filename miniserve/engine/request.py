@@ -1,14 +1,16 @@
 """Request state machine.
 
     WAITING --> PREFILL --> DECODE --> FINISHED
-       ^                      |
-       +----- preempted ------+
+       ^           |          |
+       +-------- preempted ---+
 
     WAITING / PREFILL / DECODE --> ABORTED
 
-PREFILL is the step in which the prompt is run; the first output token is
+PREFILL is the step in which the prompt is run (with chunked prefill, the
+steps: a long prompt is run a chunk per step); the first output token is
 sampled at the end of it, so a request can finish straight from PREFILL (stop
-token or ``max_new_tokens == 1``).
+token or ``max_new_tokens == 1``). A request can be preempted between chunks
+(PREFILL -> WAITING).
 
 A preempted request (DECODE -> WAITING) loses its KV cache but keeps its
 output. When it is admitted again, its prefill runs prompt + output, and the
@@ -35,7 +37,10 @@ class RequestState(enum.Enum):
 
 _TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED}),
-    RequestState.PREFILL: frozenset({RequestState.DECODE, RequestState.FINISHED, RequestState.ABORTED}),
+    # PREFILL -> WAITING: preempted between chunks of a chunked prefill.
+    RequestState.PREFILL: frozenset(
+        {RequestState.DECODE, RequestState.FINISHED, RequestState.ABORTED, RequestState.WAITING}
+    ),
     RequestState.DECODE: frozenset({RequestState.FINISHED, RequestState.ABORTED, RequestState.WAITING}),
     RequestState.FINISHED: frozenset(),
     RequestState.ABORTED: frozenset(),
