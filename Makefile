@@ -69,7 +69,7 @@ bench-offline:
 
 profile-offline:
 	mkdir -p $(dir $(NSYS_OUT))
-	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NSYS_HOST):/opt/nsys:ro \
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace -v $(NSYS_HOST):/opt/nsys:ro -e NSYS_NVTX_PROFILER_REGISTER_ONLY=0 \
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
 		$(IMAGE) /opt/nsys/target-linux-x64/nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false \
 		--capture-range=nvtx --nvtx-capture=measure --capture-range-end=stop \
