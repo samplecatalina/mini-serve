@@ -30,7 +30,9 @@ def main() -> int:
     ap.add_argument("--num-requests", type=int, default=64)
     ap.add_argument("--prompt-len", type=int, nargs=2, default=[4, 1024], metavar=("MIN", "MAX"))
     ap.add_argument("--max-new-tokens", type=int, nargs=2, default=[1, 256], metavar=("MIN", "MAX"))
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workload-seed", type=int, default=0)
+    ap.add_argument("--temperature", type=float, default=0.0, help="0: greedy")
+    ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-steps", type=int, default=1_000_000, help="fail if not done after this many steps")
     args = ap.parse_args()
 
@@ -38,12 +40,13 @@ def main() -> int:
     model = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(path)), load_weights(path))
     eng = Engine(model, **engine_kwargs(args))
 
-    rng = random.Random(args.seed)
+    rng = random.Random(args.workload_seed)
     reqs = []
     for _ in range(args.num_requests):
         # Random ids below the special-token range; prompts are not meant to be meaningful.
         prompt = [rng.randrange(150_000) for _ in range(rng.randint(*args.prompt_len))]
-        reqs.append(eng.add_request(prompt, SamplingParams(rng.randint(*args.max_new_tokens), STOP_IDS)))
+        params = SamplingParams(rng.randint(*args.max_new_tokens), STOP_IDS, args.temperature, args.top_p)
+        reqs.append(eng.add_request(prompt, params))
 
     steps = prefill_steps = max_decode_batch = max_used = 0
     alloc = eng.runner.allocator
@@ -62,6 +65,7 @@ def main() -> int:
 
     report = dict(
         engine=engine_kwargs(args),
+        sampling=dict(temperature=args.temperature, top_p=args.top_p),
         kv_profile=getattr(eng.runner, "kv_profile", None),
         num_requests=len(reqs),
         prompt_tokens=sum(len(r.prompt_ids) for r in reqs),

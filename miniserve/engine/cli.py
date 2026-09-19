@@ -19,6 +19,7 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="exact KV pool size in tokens (rounded down to whole blocks); "
         "default: as large as GPU memory allows. An experiment dimension, not only a limit.",
     )
+    g.add_argument("--seed", type=int, default=0, help="seeds sampling for requests that bring no seed of their own")
 
 
 def engine_kwargs(args: argparse.Namespace) -> dict:
@@ -27,4 +28,5 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         max_prefill_tokens=args.max_prefill_tokens,
         attention=args.attention,
         kv_pool_tokens=args.kv_pool_tokens,
+        seed=args.seed,
     )

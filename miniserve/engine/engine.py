@@ -2,14 +2,20 @@
 
 Synchronous: the caller drives ``step()``. Requests can be added or aborted
 between steps, and each step re-forms the batch from whatever is running.
+
+Sampling stays on the device; the host waits for the device once per step,
+when the sampled tokens are copied back (``_read_back``). Input staging in
+the model runner still uses synchronous host-to-device copies.
 """
 
 from __future__ import annotations
 
 import itertools
+import random
 from collections.abc import Sequence
 
-from miniserve.engine import sampler
+import torch
+
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase, Scheduler
@@ -24,13 +30,19 @@ class Engine:
         max_prefill_tokens: int = 8192,
         attention: str = "paged",
         kv_pool_tokens: int | None = None,
+        seed: int = 0,
         runner: ModelRunner | None = None,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
-        ``runner``: use this model runner instead of building one for ``model``."""
+        ``seed``: seeds the sampling of requests submitted without a seed of their own, in
+        submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
             runner = ModelRunner(
-                model, attention=attention, kv_pool_tokens=kv_pool_tokens, max_prefill_tokens=max_prefill_tokens
+                model,
+                attention=attention,
+                kv_pool_tokens=kv_pool_tokens,
+                max_prefill_tokens=max_prefill_tokens,
+                max_running=max_running,
             )
         self.runner = runner
         # With a paged pool the scheduler budgets KV blocks and preempts through the runner.
@@ -42,11 +54,13 @@ class Engine:
         )
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
+        self._seeds = random.Random(seed)
         # Called with (batch, logits) before sampling; used by diagnostics.
         self.logits_hook = None
 
     def add_request(self, prompt_ids: Sequence[int], params: SamplingParams) -> Request:
         req = Request(next(self._rids), list(prompt_ids), params)
+        req.seed = params.seed if params.seed is not None else self._seeds.randrange(2**32)
         self.scheduler.add(req)
         self.requests[req.rid] = req
         return req
@@ -73,7 +87,8 @@ class Engine:
         logits = self.runner.forward(batch)
         if self.logits_hook is not None:
             self.logits_hook(batch, logits)
-        for r, tok in zip(batch.requests, sampler.greedy(logits)):
+        tokens = self._read_back(self.runner.sample(batch, logits))
+        for r, tok in zip(batch.requests, tokens):
             r.output_ids.append(tok)
             if r.should_stop():
                 r.transition(RequestState.FINISHED)
@@ -81,6 +96,18 @@ class Engine:
             elif r.state is RequestState.PREFILL:
                 r.transition(RequestState.DECODE)
         return batch
+
+    @staticmethod
+    def _read_back(tokens: torch.Tensor) -> list[int]:
+        """Copy sampled tokens to the host. The one device-to-host synchronization of a step:
+        everything before it is queued on the device without waiting."""
+        if tokens.device.type != "cuda":
+            return tokens.tolist()
+        host = tokens.to("cpu", non_blocking=True)
+        done = torch.cuda.Event()
+        done.record()
+        done.synchronize()
+        return host.tolist()
 
     def _retire(self, req: Request) -> None:
         self.runner.release(req)

@@ -18,6 +18,7 @@ from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
 from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.request import Request
+from miniserve.engine.sampler import Sampler, SamplingArgs
 from miniserve.engine.scheduler import Batch, Phase
 from miniserve.model.attention import ContiguousAttention, FlashInferPagedAttention
 from miniserve.model.qwen3 import Qwen3ForCausalLM
@@ -34,16 +35,18 @@ class ModelRunner:
         block_size: int = 16,
         max_prefill_tokens: int = 8192,
         kv_mem_fraction: float = 0.9,
+        max_running: int = 64,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
-        weights and the peak activations of a ``max_prefill_tokens`` prefill
-        (``kv_mem_fraction`` of it); ``kv_pool_tokens`` caps it at an exact size
-        and must fit in that memory."""
+        weights and the peak memory of a ``max_prefill_tokens`` prefill followed
+        by sampling ``max_running`` rows (``kv_mem_fraction`` of it);
+        ``kv_pool_tokens`` sets an exact size and must fit in that memory."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
         self.device = model.device
         self.attention = attention
+        self.sampler = Sampler(model.device, model.cfg.vocab_size)
         self.allocator: BlockAllocator | None = None
         if attention == "paged":
             cfg = model.cfg
@@ -53,7 +56,7 @@ class ModelRunner:
                     cfg.num_layers, num_blocks, block_size, cfg.num_kv_heads, cfg.head_dim, model.dtype, model.device
                 )
 
-            self.kv_profile = self._profile(pool, block_size, max_prefill_tokens, kv_mem_fraction)
+            self.kv_profile = self._profile(pool, block_size, max_prefill_tokens, max_running, kv_mem_fraction)
             num_blocks = self.kv_profile["max_blocks"]
             if kv_pool_tokens is not None:
                 if kv_pool_tokens < block_size:
@@ -69,8 +72,9 @@ class ModelRunner:
             self.pool = pool(num_blocks)
             self.flashinfer.pool = self.pool
 
-    def _profile(self, make_pool, block_size: int, num_tokens: int, fraction: float) -> dict[str, int]:
-        """Peak activation memory of a ``num_tokens`` prefill, and the KV blocks that fit next to it.
+    def _profile(self, make_pool, block_size: int, num_tokens: int, num_rows: int, fraction: float) -> dict[str, int]:
+        """Peak activation memory of a ``num_tokens`` prefill followed by sampling ``num_rows``
+        rows, and the KV blocks that fit next to it.
 
         Also creates the attention backend (its workspace stays allocated). The
         pass writes into a probe pool just large enough for it, freed before the
@@ -92,6 +96,12 @@ class ModelRunner:
             self.flashinfer,
             [num_tokens],
         )
+        # The largest sampling step: every row sampled with a nucleus (the most temporaries).
+        logits = torch.zeros(num_rows, cfg.vocab_size, dtype=self.model.dtype, device=self.device)
+        ones = torch.ones(num_rows, device=self.device)
+        rows = torch.arange(num_rows, device=self.device)
+        self.sampler.sample(logits, SamplingArgs(ones, ones * 0.9, rows, rows, any_top_p=True))
+        del logits
         torch.cuda.synchronize(self.device)
         peak = torch.cuda.max_memory_allocated(self.device) - base
         self.flashinfer.pool = None
@@ -121,6 +131,10 @@ class ModelRunner:
         if isinstance(req.cache, BlockTable):
             req.cache.release()
         req.cache = None
+
+    def sample(self, batch: Batch, logits: torch.Tensor) -> torch.Tensor:
+        """Next token of each request, ``[len(batch.requests)]`` int64, left on the device."""
+        return self.sampler.sample(logits, self.sampler.prepare(batch.requests))
 
     def forward(self, batch: Batch) -> torch.Tensor:
         """Logits ``[len(batch.requests), vocab]`` for the last token of each request."""

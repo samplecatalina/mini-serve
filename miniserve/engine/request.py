@@ -50,10 +50,23 @@ class InvalidTransition(RuntimeError):
 class SamplingParams:
     max_new_tokens: int
     stop_token_ids: frozenset[int] = frozenset()
+    temperature: float = 0.0  # 0 means greedy
+    top_p: float = 1.0  # nucleus: sample from the smallest set of tokens with probability mass >= top_p
+    seed: int | None = None  # None: the engine assigns one
 
     def __post_init__(self):
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be >= 1, got {self.max_new_tokens}")
+        if not self.temperature >= 0:
+            raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+        if not 0 < self.top_p <= 1:
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+        if self.seed is not None and not 0 <= self.seed < 2**32:
+            raise ValueError(f"seed must be in [0, 2**32), got {self.seed}")
+
+    @property
+    def is_greedy(self) -> bool:
+        return self.temperature == 0
 
 
 @dataclass(eq=False)
@@ -67,6 +80,8 @@ class Request:
     # owned by the model runner between admission and release.
     cache: BlockTable | ContiguousKVCache | None = None
     num_preemptions: int = 0
+    # Seed of the sampling noise; fixed when the request is submitted.
+    seed: int = 0
 
     def __post_init__(self):
         if not self.prompt_ids:

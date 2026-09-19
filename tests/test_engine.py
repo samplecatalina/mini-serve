@@ -30,6 +30,7 @@ from miniserve.cache.block_table import BlockTable
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import InvalidTransition, Request, RequestState, SamplingParams
+from miniserve.engine.sampler import Sampler
 from miniserve.engine.scheduler import Batch, Phase, Scheduler
 from prompts import PROMPTS, encode
 
@@ -299,12 +300,24 @@ def _toy_next(tokens: list[int]) -> int:
     return (sum((i + 1) * t for i, t in enumerate(tokens)) * 31 + len(tokens)) % TOY_VOCAB
 
 
-def _toy_generate(prompt: list[int], max_new: int) -> list[int]:
+def _toy_logits(tokens: list[int]) -> torch.Tensor:
+    """Logits over the toy vocabulary: pseudo-random in the whole sequence, with ``_toy_next`` far ahead."""
+    key = (sum((i + 1) * t for i, t in enumerate(tokens)) * 131 + len(tokens)) % 2**31
+    logits = torch.randn(TOY_VOCAB, generator=torch.Generator().manual_seed(key))
+    logits[_toy_next(tokens)] += 10.0  # greedy decoding follows _toy_next
+    return logits
+
+
+def _toy_generate(prompt: list[int], params: SamplingParams, seed: int = 0) -> list[int]:
+    """The request alone: one row at a time through the same sampler."""
+    sampler = Sampler("cpu", TOY_VOCAB)
     seq, out = list(prompt), []
-    while len(out) < max_new:
-        out.append(_toy_next(seq))
+    while len(out) < params.max_new_tokens:
+        r = Request(0, list(prompt), params, output_ids=list(out))
+        r.seed = seed
+        out.append(int(sampler.sample(_toy_logits(seq)[None], sampler.prepare([r]))[0]))
         seq.append(out[-1])
-        if out[-1] == TOY_STOP:
+        if out[-1] in params.stop_token_ids:
             break
     return out
 
@@ -327,12 +340,12 @@ class _ToyModel:
     def forward_with(self, input_ids, positions, attn, seq_lens):
         for slot, t, p in zip(self.slots, input_ids.tolist(), positions.tolist()):
             self.store[slot] = (t, p)
-        logits = torch.zeros(len(self.tables), TOY_VOCAB)
-        for b, table in enumerate(self.tables):
+        rows = []
+        for table in self.tables:
             hist = [self.store[table.slot(i)] for i in range(table.num_tokens)]
             assert [p for _, p in hist] == list(range(table.num_tokens)), "KV positions out of order"
-            logits[b, _toy_next([t for t, _ in hist])] = 1.0
-        return logits
+            rows.append(_toy_logits([t for t, _ in hist]))
+        return torch.stack(rows)
 
 
 def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
@@ -341,36 +354,40 @@ def _toy_engine(num_blocks: int, block_size: int, **kw) -> Engine:
     runner.device = torch.device("cpu")
     runner.attention = "paged"
     runner.allocator = BlockAllocator(num_blocks, block_size)
+    runner.sampler = Sampler("cpu", TOY_VOCAB)
     return Engine(None, runner=runner, **kw)
 
 
 @pytest.mark.parametrize("num_blocks", [8, 16, 64])
 @pytest.mark.parametrize("seed", range(10))
 def test_simulated_load_under_kv_pressure(seed, num_blocks):
-    """Random arrivals and lengths in a small pool: no OutOfBlocks, no stall,
-    and every output equals the request run alone, preempted or not."""
+    """Random arrivals, lengths and sampling settings in a small pool: no OutOfBlocks, no stall,
+    and every output (greedy or sampled) equals the request run alone, preempted or not."""
     import random
 
     rng = random.Random(seed)
     block_size = 4
     eng = _toy_engine(num_blocks, block_size, max_running=16, max_prefill_tokens=48)
     cap = num_blocks * block_size
-    arrivals: dict[int, list[tuple[list[int], int]]] = {}
+    arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
     for _ in range(40):
         n = rng.randint(1, min(30, cap - 1))
         prompt = [rng.randrange(1, TOY_VOCAB) for _ in range(n)]
-        arrivals.setdefault(rng.randrange(60), []).append((prompt, rng.randint(1, min(40, cap - n))))
+        temperature, top_p = rng.choice([(0.0, 1.0), (4.0, 1.0), (4.0, 0.9)])
+        req_seed = rng.choice([None, rng.randrange(2**32)])  # None: assigned by the engine
+        params = SamplingParams(rng.randint(1, min(40, cap - n)), frozenset({TOY_STOP}), temperature, top_p, req_seed)
+        arrivals.setdefault(rng.randrange(60), []).append((prompt, params))
     reqs, step = [], 0
     while eng.has_unfinished or step < 60:
-        for prompt, max_new in arrivals.get(step, []):
-            reqs.append(eng.add_request(prompt, SamplingParams(max_new, frozenset({TOY_STOP}))))
+        for prompt, params in arrivals.get(step, []):
+            reqs.append(eng.add_request(prompt, params))
         eng.step()
         eng.runner.allocator.check_invariants()
         step += 1
         assert step < 20_000, "no progress"
     for r in reqs:
         assert r.state is RequestState.FINISHED
-        assert r.output_ids == _toy_generate(r.prompt_ids, r.params.max_new_tokens), f"request {r.rid}"
+        assert r.output_ids == _toy_generate(r.prompt_ids, r.params, r.seed), f"request {r.rid} {r.params}"
     a = eng.runner.allocator
     assert a.num_free == a.num_blocks
     if num_blocks == 8:
@@ -696,7 +713,20 @@ def test_kv_pool_sizing(model):
     assert eng.runner.pool.num_bytes == prof["num_blocks"] * prof["block_bytes"]
     assert prof["block_bytes"] == 2 * 28 * 16 * 8 * 128 * 2  # Qwen3-0.6B, BF16: 112 KiB per token
     assert prof["num_blocks"] * prof["block_bytes"] <= 0.9 * (prof["free_bytes"] - prof["peak_activation_bytes"])
-    del eng
+    # The profiled peak covers the largest sampling step (64 rows, every row sampled with a nucleus).
+    from miniserve.engine.sampler import SamplingArgs
+
+    logits = torch.randn(64, model.cfg.vocab_size, device=model.device, dtype=model.dtype)
+    ones, rows = torch.ones(64, device=model.device), torch.arange(64, device=model.device)
+    torch.cuda.synchronize()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    eng.runner.sampler.sample(logits, SamplingArgs(ones, ones * 0.9, rows, rows, any_top_p=True))
+    torch.cuda.synchronize()
+    sampling_peak = torch.cuda.max_memory_allocated() - base
+    print(f"sampling peak over 64 rows: {sampling_peak} B")
+    assert 0 < sampling_peak <= prof["peak_activation_bytes"]
+    del eng, logits
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -759,3 +789,32 @@ def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64
     assert eng.scheduler.num_preemptions > 0, "the pool is too large to exercise preemption"
     _check_all(f"64 concurrent {arrival}, pool {pool_tokens}", model, workload64, reqs)
     _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_sampled_requests_alongside_greedy(model, reference):
+    """Sampled requests share batches with greedy ones: greedy output still passes the anchor, and
+    the sampled output is reproducible (same seeds, same schedule) and actually sampled."""
+    sampled = {
+        f"s_{k}": (reference[k][0], SamplingParams(32, STOP_IDS, temperature=0.8, top_p=0.9, seed=i))
+        for i, k in enumerate(["short_en", "code", "chat"])
+    }
+
+    def run():
+        eng = _engine(model, attention="paged")
+        greedy = {k: eng.add_request(reference[k][0], SamplingParams(reference[k][1], STOP_IDS)) for k in PROMPTS}
+        samp = {k: eng.add_request(ids, p) for k, (ids, p) in sampled.items()}
+        while eng.has_unfinished:
+            eng.step()
+        _assert_no_leak(eng)
+        return greedy, samp
+
+    greedy, first = run()
+    _check_all("greedy next to sampled", model, reference, greedy)
+    _, second = run()
+    for k in sampled:
+        assert first[k].output_ids == second[k].output_ids, k
+    differs = [k for k in sampled if first[k].output_ids != reference[k[2:]][2][: len(first[k].output_ids)]]
+    print(f"\nsampled outputs differing from greedy: {differs}")
+    assert differs, "temperature 0.8 never left the greedy path"
