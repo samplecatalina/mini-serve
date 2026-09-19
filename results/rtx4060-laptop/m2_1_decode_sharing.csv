@@ -1,0 +1,4 @@
+run_id,case,num_seqs,seq_len,prefix_len,groups,logical_kv_mib,unique_kv_mib,kernel_us,kernel_us_min,kernel_us_max,logical_gb_s,unique_gb_s,sm_mhz_mean,git_commit
+20260919T080410,distinct,64,1152,1024,64,288.0,288.0,1216.77,1215.56,1217.03,248.2,248.2,2058.0,29eb3b557dd5
+20260919T080410,shared,64,1152,1024,8,288.0,64.0,294.21,293.81,295.5,1026.4,228.1,2495.0,29eb3b557dd5
+20260919T080410,shared-all,64,1152,1024,1,288.0,36.0,276.98,276.14,278.76,1090.3,136.3,2465.0,29eb3b557dd5

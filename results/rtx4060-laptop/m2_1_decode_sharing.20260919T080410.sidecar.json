@@ -1,0 +1,90 @@
+{
+  "run_id": "20260919T080410",
+  "config": {
+    "num_seqs": 64,
+    "seq_len": 1152,
+    "prefix_len": 1024,
+    "groups": 8,
+    "iters": 200,
+    "repeats": 7,
+    "case": null,
+    "out": "m2_1_decode_sharing",
+    "allow_dirty": false
+  },
+  "environment": {
+    "git_commit": "29eb3b557dd50192706e4f2c90698d950630593a",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.47",
+    "cpu": "AMD Ryzen 9 7945HX with Radeon Graphics"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 16711.88022193,
+      "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 53,
+      "power_w": 3.63,
+      "power_limit_w": 121.6,
+      "reasons": "0x0000000000000001",
+      "util": 1,
+      "mem_used_mib": 1276
+    },
+    "idle_power_limit_w": [
+      115.0,
+      115.0,
+      115.0,
+      116.61,
+      121.49,
+      121.6
+    ],
+    "power_max_limit_w": 140.0,
+    "host": {
+      "ac_power": true,
+      "power_scheme": "52521609-efc9-4268-b9ba-67dea73f18b2",
+      "high_performance": true
+    }
+  },
+  "warmup": {
+    "note": "10 untimed launches per case"
+  },
+  "gpu_during_runs": [
+    {
+      "num_samples": 12,
+      "sm_mhz": {
+        "min": 210,
+        "max": 2520,
+        "mean": 2115.0
+      },
+      "mem_mhz": {
+        "min": 405,
+        "max": 8001,
+        "mean": 6735.0
+      },
+      "temp_c": {
+        "min": 53,
+        "max": 69,
+        "mean": 60.08
+      },
+      "power_w": {
+        "min": 6.27,
+        "max": 127.12,
+        "mean": 75.31
+      },
+      "power_limit_w": {
+        "min": 121.06,
+        "max": 127.22,
+        "mean": 123.29
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000001",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}

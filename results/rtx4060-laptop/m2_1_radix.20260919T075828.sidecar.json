@@ -1,0 +1,316 @@
+{
+  "run_id": "20260919T075828",
+  "config": {
+    "max_running": 64,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 32768,
+    "seed": 0,
+    "disable_radix": false,
+    "workload": "shared",
+    "groups": 8,
+    "per_group": 8,
+    "prefix_len": 1024,
+    "suffix_len": 64,
+    "output_len": 64,
+    "arrival_rate": 4.0,
+    "workload_seed": 0,
+    "ablate": "radix",
+    "rounds": 3,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 90.0,
+    "out": "m2_1_radix",
+    "allow_dirty": false,
+    "results_dir": "results/rtx4060-laptop",
+    "engine": {
+      "max_running": 64,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 32768,
+      "seed": 0,
+      "radix": true
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 536867328,
+      "free_bytes": 5901385728,
+      "total_bytes": 8585216000,
+      "block_bytes": 1835008,
+      "max_blocks": 2631,
+      "num_blocks": 2048
+    }
+  },
+  "environment": {
+    "git_commit": "29eb3b557dd50192706e4f2c90698d950630593a",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.47",
+    "cpu": "AMD Ryzen 9 7945HX with Radeon Graphics"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 16367.869402825,
+      "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 48,
+      "power_w": 3.42,
+      "power_limit_w": 135.65,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 1283
+    },
+    "idle_power_limit_w": [
+      115.0,
+      120.73,
+      129.87,
+      133.45,
+      134.73,
+      135.65
+    ],
+    "power_max_limit_w": 140.0,
+    "host": {
+      "ac_power": true,
+      "power_scheme": "52521609-efc9-4268-b9ba-67dea73f18b2",
+      "high_performance": true
+    }
+  },
+  "warmup": {
+    "seconds": 17.0,
+    "runs": 1,
+    "gpu": {
+      "num_samples": 32,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2535,
+        "mean": 2530.78
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 52,
+        "max": 58,
+        "mean": 53.84
+      },
+      "power_w": {
+        "min": 25.3,
+        "max": 81.14,
+        "mean": 42.61
+      },
+      "power_limit_w": {
+        "min": 118.58,
+        "max": 131.36,
+        "mean": 121.48
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "radix_on",
+      "num_samples": 32,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2535,
+        "mean": 2520.94
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 53,
+        "max": 57,
+        "mean": 55.44
+      },
+      "power_w": {
+        "min": 19.07,
+        "max": 54.22,
+        "mean": 41.94
+      },
+      "power_limit_w": {
+        "min": 116.83,
+        "max": 124.15,
+        "mean": 120.09
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "radix_off",
+      "num_samples": 31,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 56,
+        "max": 62,
+        "mean": 58.52
+      },
+      "power_w": {
+        "min": 16.71,
+        "max": 83.78,
+        "mean": 52.15
+      },
+      "power_limit_w": {
+        "min": 119.28,
+        "max": 125.04,
+        "mean": 122.19
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 2,
+      "arm": "radix_off",
+      "num_samples": 31,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 55,
+        "max": 63,
+        "mean": 58.58
+      },
+      "power_w": {
+        "min": 32.28,
+        "max": 83.03,
+        "mean": 53.13
+      },
+      "power_limit_w": {
+        "min": 121.3,
+        "max": 125.63,
+        "mean": 122.64
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 3,
+      "arm": "radix_on",
+      "num_samples": 32,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 54,
+        "max": 59,
+        "mean": 56.84
+      },
+      "power_w": {
+        "min": 16.66,
+        "max": 51.06,
+        "mean": 42.12
+      },
+      "power_limit_w": {
+        "min": 118.12,
+        "max": 123.85,
+        "mean": 120.67
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 4,
+      "arm": "radix_on",
+      "num_samples": 31,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 55,
+        "max": 59,
+        "mean": 56.68
+      },
+      "power_w": {
+        "min": 16.49,
+        "max": 50.85,
+        "mean": 41.75
+      },
+      "power_limit_w": {
+        "min": 119.31,
+        "max": 123.25,
+        "mean": 120.44
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 5,
+      "arm": "radix_off",
+      "num_samples": 31,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 56,
+        "max": 63,
+        "mean": 58.97
+      },
+      "power_w": {
+        "min": 37.86,
+        "max": 76.07,
+        "mean": 54.15
+      },
+      "power_limit_w": {
+        "min": 120.29,
+        "max": 125.13,
+        "mean": 122.52
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    }
+  ]
+}
