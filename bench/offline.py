@@ -225,6 +225,7 @@ def main() -> int:
     g.add_argument("--workload-seed", type=int, default=0)
     g.add_argument("--ablate", choices=sorted(ABLATIONS), default="none")
     g.add_argument("--rounds", type=int, default=3, help="runs per arm")
+    g.add_argument("--arms", nargs="+", default=None, help="run only these arms of the ablation (e.g. under a profiler)")
     g.add_argument("--warmup-min-s", type=float, default=10.0)
     g.add_argument("--warmup-max-s", type=float, default=90.0)
     g.add_argument("--out", required=True, help=f"results name: {RESULTS_DIR}/<out>.csv and a sidecar per run id")
@@ -242,6 +243,11 @@ def main() -> int:
     model = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(path)), load_weights(path))
     eng = Engine(model, **engine_kwargs(args))
     arms = ABLATIONS[args.ablate]
+    if args.arms:
+        unknown = set(args.arms) - set(arms)
+        if unknown:
+            raise SystemExit(f"unknown arms {sorted(unknown)} for --ablate {args.ablate}: {arms}")
+        arms = tuple(a for a in arms if a in args.arms)
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     os.makedirs(args.results_dir, exist_ok=True)
 
