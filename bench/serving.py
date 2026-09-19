@@ -68,6 +68,9 @@ FAIRNESS = (
 BLUEPRINT_COMMIT = "9a91cfafe754aa85daee49998176275667eb58f2"  # sgl-project/mini-sglang, see docs/design.md
 
 INFO_ROUTE = {"miniserve": "/server_info", "sglang": "/get_server_info"}
+# Counters the engine keeps about its own steps. Only this engine has them; against
+# another server the row simply has no running batch, which is stated rather than guessed.
+STATS_ROUTE = {"miniserve": "/stats"}
 
 
 def get_json(url: str, timeout: float = 30.0) -> dict:
@@ -158,6 +161,26 @@ def loaded_gpu(samples, util_min: int = 50) -> dict:
     )
 
 
+# Counters that accumulate; the rest of a snapshot is a reading at that instant.
+CUMULATIVE = ("steps", "prefill_steps", "decode_steps", "mixed_steps",
+              "decode_rows", "steps_with_decode", "prefill_tokens", "preemptions")
+
+
+def stats_delta(before: dict | None, after: dict | None) -> dict:
+    """What the engine did between two snapshots of its counters.
+
+    Computed here rather than imported from the server: this runs in the load
+    generator's image, which holds no torch and so cannot import the engine.
+    """
+    if not before or not after:
+        return {}
+    d = {k: after[k] - before[k] for k in CUMULATIVE}
+    d["running_batch_mean"] = round(d["decode_rows"] / d["steps_with_decode"], 2) if d["steps_with_decode"] else 0.0
+    d["running_at_end"] = after["running"]
+    d["waiting_at_end"] = after["waiting"]
+    return d
+
+
 def cpu_model() -> str:
     try:
         for line in open("/proc/cpuinfo"):
@@ -206,7 +229,18 @@ def warmup_ratio(warmup_s: float, max_time_per_run_min: int) -> float:
     return ratio
 
 
-def genai_bench_cmd(args, ratio: float, exp_dir: str, base: str) -> list[str]:
+def engine_stats(url: str, kind: str) -> dict | None:
+    """The engine's step counters, when it keeps any."""
+    route = STATS_ROUTE.get(kind)
+    if route is None:
+        return None
+    try:
+        return get_json(url + route)
+    except Exception:
+        return None
+
+
+def genai_bench_cmd(args, ratio: float, exp_dir: str, base: str, concurrency: int) -> list[str]:
     cmd = [
         "genai-bench", "benchmark",
         "--api-backend", "openai",
@@ -224,8 +258,7 @@ def genai_bench_cmd(args, ratio: float, exp_dir: str, base: str) -> list[str]:
         "--log-dir", os.path.join(base, exp_dir),
         "--additional-request-params", json.dumps(args.sampling),
     ]
-    for c in args.concurrency:
-        cmd += ["--num-concurrency", str(c)]
+    cmd += ["--num-concurrency", str(concurrency)]
     for s in args.scenario:
         cmd += ["--traffic-scenario", s]
     if args.server_engine:
@@ -326,27 +359,46 @@ def main() -> int:
     if missing:
         raise SystemExit(f"the fairness record is missing {missing}; refusing to run")
 
-    cmd = genai_bench_cmd(args, ratio, raw_dir, results_dir)
-    print("$ " + " ".join(cmd), flush=True)
-    with sidecar.GpuSampler() as gpu:
-        t_start = gpu.sample_now()
-        rc = subprocess.run(cmd).returncode
-        t_end = gpu.sample_now()
-        gpu_during = gpu.summary(since=t_start, until=t_end)
-        gpu_loaded = loaded_gpu([x for x in gpu.snapshot() if t_start <= x.t <= t_end])
-    if rc != 0:
-        raise SystemExit(f"genai-bench exited {rc}; no results written")
-
-    out_dir = os.path.join(results_dir, raw_dir)
-    runs = sorted(f for f in os.listdir(out_dir) if f.endswith(".json") and f != "experiment_metadata.json")
-    if not runs:
-        raise SystemExit(f"genai-bench wrote no per-run JSON into {out_dir}")
-
-    dropped = prune_raw(out_dir)
+    # One invocation per concurrency level, rather than one that sweeps them.
+    # genai-bench can sweep, but then every level shares one window, and the two
+    # things only this side can measure -- the batch the engine actually formed and
+    # the clock it ran at -- could not be attributed to a level.
     rows: list[dict] = []
-    for f in runs:
-        for row in flatten(os.path.join(out_dir, f)):
-            rows.append(dict(run_id=run_id, arm=args.label, device=pre["idle_gpu"]["name"], **row))
+    per_level: dict[str, dict] = {}
+    with sidecar.GpuSampler() as gpu:
+        for c in args.concurrency:
+            level_dir = f"{raw_dir}/c{c}"
+            os.makedirs(os.path.join(results_dir, level_dir), exist_ok=True)
+            cmd = genai_bench_cmd(args, ratio, level_dir, results_dir, c)
+            print(f"\n$ {' '.join(cmd)}", flush=True)
+            before = engine_stats(args.url, args.server_kind)
+            t_start = gpu.sample_now()
+            rc = subprocess.run(cmd).returncode
+            t_end = gpu.sample_now()
+            after = engine_stats(args.url, args.server_kind)
+            if rc != 0:
+                raise SystemExit(f"genai-bench exited {rc} at concurrency {c}; no results written")
+
+            out_dir = os.path.join(results_dir, level_dir)
+            runs = sorted(f for f in os.listdir(out_dir) if f.endswith(".json") and f != "experiment_metadata.json")
+            if not runs:
+                raise SystemExit(f"genai-bench wrote no per-run JSON into {out_dir}")
+            steps = stats_delta(before, after)
+            clocks = loaded_gpu([x for x in gpu.snapshot() if t_start <= x.t <= t_end])
+            per_level[f"c{c}"] = dict(engine=steps, gpu_while_loaded=clocks,
+                                      gpu=gpu.summary(since=t_start, until=t_end), kept=runs,
+                                      dropped=prune_raw(out_dir))
+            for f in runs:
+                for row in flatten(os.path.join(out_dir, f)):
+                    rows.append(dict(
+                        run_id=run_id, arm=args.label, device=pre["idle_gpu"]["name"], **row,
+                        running_batch_mean=steps.get("running_batch_mean", "") if steps else "",
+                        preemptions=steps.get("preemptions", "") if steps else "",
+                        engine_steps=steps.get("steps", "") if steps else "",
+                        sm_mhz_mean=clocks.get("sm_mhz", {}).get("mean", "") if clocks else "",
+                    ))
+        gpu_during = gpu.summary()
+
     rows.sort(key=lambda r: (r["scenario"], r["concurrency"]))
 
     path = f"{results_dir}/{args.out}.csv"
@@ -367,19 +419,22 @@ def main() -> int:
             warmup=dict(seconds=args.warmup_s, ratio=round(ratio, 4),
                         note="genai-bench discards this fraction of every run; both sides of a comparison use the same seconds"),
             gpu_during_runs=gpu_during,
-            gpu_while_loaded=gpu_loaded,
+            per_concurrency=per_level,
             fairness=fairness,
-            raw=dict(dir=raw_dir, kept=runs + ["experiment_metadata.json"], dropped=dropped),
+            raw=raw_dir,
         ),
     )
 
     print(f"\n{len(rows)} rows -> {path}   (raw genai-bench output in {out_dir})")
-    hdr = f"{'arm':<12}{'scenario':<16}{'conc':>6}{'out tok/s':>11}{'TTFT p50':>10}{'TTFT p95':>10}{'TPOT p50':>10}{'TPOT p99':>10}{'err':>6}"
-    print(hdr)
+    print(f"{'arm':<12}{'scenario':<16}{'conc':>6}{'batch':>8}{'out tok/s':>11}{'TTFT p50':>11}"
+          f"{'TTFT p95':>11}{'TPOT p50':>10}{'TPOT p99':>10}{'preempt':>9}{'err':>5}")
     for r in rows:
-        print(f"{r['arm']:<12}{r['scenario']:<16}{r['concurrency']:6d}{r['output_tok_s']:11.1f}"
-              f"{r['ttft_p50_ms']:10.1f}{r['ttft_p95_ms']:10.1f}{r['tpot_p50_ms']:10.2f}{r['tpot_p99_ms']:10.2f}"
-              f"{r['num_errors']:6d}")
+        print(f"{r['arm']:<12}{r['scenario']:<16}{r['concurrency']:6d}{str(r['running_batch_mean']):>8}"
+              f"{r['output_tok_s']:11.1f}{r['ttft_p50_ms']:11.1f}{r['ttft_p95_ms']:11.1f}"
+              f"{r['tpot_p50_ms']:10.2f}{r['tpot_p99_ms']:10.2f}{str(r['preemptions']):>9}{r['num_errors']:5d}")
+    if rows and rows[0]["running_batch_mean"] != "":
+        print("\n`batch` is the decode rows the engine actually formed, averaged over steps: on a pool"
+              "\nsmaller than the offered concurrency it is the number the concurrency turns into.")
     return 0
 
 

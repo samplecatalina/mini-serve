@@ -586,3 +586,26 @@ def test_http_disconnects_return_all_blocks(server):
     states = {s for s, _ in aborted_states}
     assert {"WAITING", "DECODE"} <= states, aborted_states
     assert preemptions > preemptions_before, "the small pool should force preemption"
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_stats_reports_the_batch_the_engine_formed(server):
+    """A benchmark reads the running batch from here: its own view is the concurrency it
+    offered, which against a pool smaller than that concurrency is a queue, not a batch."""
+    import httpx
+
+    url, ae, _, _ = server
+    before = httpx.get(f"{url}/stats", timeout=30).json()
+    body = dict(model="test-model", prompt="The capital of France is", max_tokens=8, temperature=0)
+    with httpx.Client(timeout=120) as c:
+        for _ in range(8):
+            c.post(f"{url}/v1/completions", json=body).raise_for_status()
+    after = httpx.get(f"{url}/stats", timeout=30).json()
+
+    assert after["steps"] > before["steps"]
+    assert after["decode_steps"] + after["mixed_steps"] > before["decode_steps"] + before["mixed_steps"]
+    assert after["prefill_tokens"] > before["prefill_tokens"]
+    # Never more than the engine was allowed to run at once, and never negative.
+    assert 0 < after["running_batch_mean"] <= 16
+    assert after["waiting"] == 0 and after["running"] == 0  # everything finished

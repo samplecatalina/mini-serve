@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from miniserve.server.async_engine import AsyncEngine, ClientDisconnected, EngineDead, RequestStream, StreamOutput
 from miniserve.server.protocol import ChatCompletionRequest, CompletionRequest, ProtocolError, sampling_params
+from miniserve.server.stats import EngineStats
 
 # Status for a response nobody reads because the client went away (nginx convention).
 CLIENT_CLOSED = 499
@@ -56,6 +57,15 @@ def build_app(
 
     app = FastAPI(title="miniserve", lifespan=lifespan)
     app.state.engine = engine
+    stats = EngineStats()
+    _also = engine.step_hook  # chained, so a caller's hook is not silently replaced
+
+    def _count(eng, batch):
+        stats.record(eng.engine, batch)
+        if _also is not None:
+            _also(eng, batch)
+
+    engine.step_hook = _count
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError):
@@ -84,6 +94,14 @@ def build_app(
         if server_info is None:
             return _error(503, "this server was built without a configuration record", "server_error")
         return dict(server_info, served_model_name=model_name, context_len=context_len)
+
+    @app.get("/stats")
+    async def _stats():
+        """Counters since the server started. A benchmark takes one before a run and
+        one after; the difference describes that run. The running batch is here and
+        nowhere else: a client sees its own concurrency, not the batch the engine
+        managed to form out of it."""
+        return stats.snapshot()
 
     @app.get("/v1/models")
     async def models():

@@ -164,3 +164,40 @@ class TestLoadedClocks:
 
     def test_no_loaded_samples_is_empty_rather_than_invented(self):
         assert serving.loaded_gpu([self.sample(0, 210)]) == {}
+
+
+class TestEngineCounters:
+    """The running batch is the one number a load generator cannot see: it reports
+    the concurrency it offered, not the batch the engine managed to form from it."""
+
+    def snapshot(self, **over):
+        base = dict(steps=0, prefill_steps=0, decode_steps=0, mixed_steps=0, decode_rows=0,
+                    steps_with_decode=0, prefill_tokens=0, preemptions=0, running=0, waiting=0)
+        return base | over
+
+    def test_the_running_batch_is_the_mean_over_steps_that_decoded(self):
+        before = self.snapshot(steps=10, decode_rows=100, steps_with_decode=10)
+        after = self.snapshot(steps=110, decode_rows=1700, steps_with_decode=110)
+        assert serving.stats_delta(before, after)["running_batch_mean"] == 16.0
+
+    def test_it_is_the_window_not_the_whole_server_lifetime(self):
+        # Warmup and an earlier concurrency level ran on the same server.
+        before = self.snapshot(steps=1000, decode_rows=1000, steps_with_decode=1000)  # batch 1 so far
+        after = self.snapshot(steps=1100, decode_rows=4200, steps_with_decode=1100)
+        assert serving.stats_delta(before, after)["running_batch_mean"] == 32.0
+
+    def test_the_queue_at_the_end_is_a_reading_not_a_difference(self):
+        d = serving.stats_delta(self.snapshot(waiting=5, running=8), self.snapshot(waiting=224, running=32))
+        assert (d["waiting_at_end"], d["running_at_end"]) == (224, 32)
+
+    def test_preemptions_accumulate(self):
+        d = serving.stats_delta(self.snapshot(preemptions=3), self.snapshot(preemptions=47))
+        assert d["preemptions"] == 44
+
+    def test_a_server_without_counters_leaves_the_field_empty(self):
+        # Another engine answers no such route; the row says nothing rather than guessing.
+        assert serving.stats_delta(None, self.snapshot()) == {}
+        assert serving.stats_delta(self.snapshot(), None) == {}
+
+    def test_a_window_with_no_decode_step_does_not_divide_by_zero(self):
+        assert serving.stats_delta(self.snapshot(), self.snapshot(steps=3, prefill_steps=3))["running_batch_mean"] == 0.0
