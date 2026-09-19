@@ -533,6 +533,28 @@ def test_simulated_load_under_kv_pressure(seed, num_blocks, chunk):
     print(f"\nseed {seed}, {num_blocks} blocks: {step} steps, {eng.scheduler.num_preemptions} preemptions")
 
 
+def test_chunks_are_cached_as_they_complete():
+    """Each chunk's full blocks enter the prefix cache as soon as it is computed. A takes the whole
+    6-token budget per step; B (sharing A's first 30 tokens) is admitted in the step of A's last
+    chunk, and already hits A's earlier chunks (36 tokens committed: B's 7 whole shared blocks)."""
+    eng = _toy_engine(64, 4, max_running=8, chunked_prefill_size=6)
+    prompt = list(range(1, 41))  # 40 tokens: 6 full chunks of 6, then 4
+    a = eng.add_request(prompt, SamplingParams(4, frozenset({TOY_STOP})))
+    b = eng.add_request(prompt[:30] + [9, 9], SamplingParams(4, frozenset({TOY_STOP})))
+    for _ in range(6):
+        eng.step()
+        assert b.state is RequestState.WAITING  # A's chunks use the whole budget
+    assert a.cache.num_tokens == 36
+    eng.step()  # A's last 4 tokens + B admitted with the 2 left
+    assert a.state is RequestState.DECODE and b.state is RequestState.PREFILL
+    assert b.num_cached_tokens == 28
+    while eng.has_unfinished:
+        eng.step()
+    for r in (a, b):
+        assert r.output_ids == _toy_generate(r.prompt_ids, r.params, r.seed)
+    _assert_no_leak(eng)
+
+
 @pytest.mark.parametrize("chunk", [0, 5, 2048])
 @pytest.mark.parametrize("radix", [True, False])
 @pytest.mark.parametrize("num_blocks", [12, 24, 96])
