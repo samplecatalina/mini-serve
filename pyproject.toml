@@ -20,10 +20,12 @@ dependencies = [
     "safetensors",
     "huggingface-hub",
     "numpy",
+    "fastapi",
+    "uvicorn",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "httpx"]
 
 [tool.uv]
 package = false
