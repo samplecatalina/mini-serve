@@ -10,6 +10,8 @@ Two KV storage / attention modes:
 
 from __future__ import annotations
 
+import gc
+
 import torch
 
 from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
@@ -28,21 +30,87 @@ class ModelRunner:
         self,
         model: Qwen3ForCausalLM,
         attention: str = "paged",
-        num_kv_blocks: int = 1024,
+        kv_pool_tokens: int | None = None,
         block_size: int = 16,
+        max_prefill_tokens: int = 8192,
+        kv_mem_fraction: float = 0.9,
     ):
+        """In paged mode the KV pool is sized from the GPU memory left after the
+        weights and the peak activations of a ``max_prefill_tokens`` prefill
+        (``kv_mem_fraction`` of it); ``kv_pool_tokens`` caps it at an exact size
+        and must fit in that memory."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
         self.device = model.device
         self.attention = attention
+        self.allocator: BlockAllocator | None = None
         if attention == "paged":
             cfg = model.cfg
-            self.allocator = BlockAllocator(num_kv_blocks, block_size)
-            self.pool = KVPool(
-                cfg.num_layers, num_kv_blocks, block_size, cfg.num_kv_heads, cfg.head_dim, model.dtype, model.device
-            )
-            self.flashinfer = FlashInferPagedAttention(self.pool, cfg.num_heads, model.attn_scale)
+
+            def pool(num_blocks: int) -> KVPool:
+                return KVPool(
+                    cfg.num_layers, num_blocks, block_size, cfg.num_kv_heads, cfg.head_dim, model.dtype, model.device
+                )
+
+            self.kv_profile = self._profile(pool, block_size, max_prefill_tokens, kv_mem_fraction)
+            num_blocks = self.kv_profile["max_blocks"]
+            if kv_pool_tokens is not None:
+                if kv_pool_tokens < block_size:
+                    raise ValueError(f"kv_pool_tokens={kv_pool_tokens} is smaller than one block ({block_size})")
+                if kv_pool_tokens // block_size > num_blocks:
+                    raise ValueError(
+                        f"kv_pool_tokens={kv_pool_tokens} does not fit: GPU memory allows "
+                        f"{num_blocks * block_size} tokens"
+                    )
+                num_blocks = kv_pool_tokens // block_size
+            self.kv_profile["num_blocks"] = num_blocks
+            self.allocator = BlockAllocator(num_blocks, block_size)
+            self.pool = pool(num_blocks)
+            self.flashinfer.pool = self.pool
+
+    def _profile(self, make_pool, block_size: int, num_tokens: int, fraction: float) -> dict[str, int]:
+        """Peak activation memory of a ``num_tokens`` prefill, and the KV blocks that fit next to it.
+
+        Also creates the attention backend (its workspace stays allocated). The
+        pass writes into a probe pool just large enough for it, freed before the
+        free memory is read.
+        """
+        cfg = self.model.cfg
+        probe = make_pool(-(-num_tokens // block_size))
+        self.flashinfer = FlashInferPagedAttention(probe, cfg.num_heads, self.model.attn_scale)
+        alloc = BlockAllocator(probe.num_blocks, block_size)
+        table = BlockTable(alloc)
+        table.append_tokens(num_tokens)
+        torch.cuda.synchronize(self.device)
+        base = torch.cuda.memory_allocated(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self.flashinfer.plan(True, [num_tokens], [table], [table.slot(p) for p in range(num_tokens)])
+        self.model.forward_with(
+            torch.zeros(num_tokens, dtype=torch.long, device=self.device),
+            torch.arange(num_tokens, device=self.device),
+            self.flashinfer,
+            [num_tokens],
+        )
+        torch.cuda.synchronize(self.device)
+        peak = torch.cuda.max_memory_allocated(self.device) - base
+        self.flashinfer.pool = None
+        del probe
+        gc.collect()
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info(self.device)
+        block_bytes = 2 * cfg.num_layers * block_size * cfg.num_kv_heads * cfg.head_dim * self.model.dtype.itemsize
+        max_blocks = int(fraction * (free - peak)) // block_bytes
+        if max_blocks < 1:
+            raise RuntimeError(f"no GPU memory left for the KV pool ({free} B free, {peak} B peak activations)")
+        return dict(
+            profile_tokens=num_tokens,
+            peak_activation_bytes=peak,
+            free_bytes=free,
+            total_bytes=total,
+            block_bytes=block_bytes,
+            max_blocks=max_blocks,
+        )
 
     def allocate(self, req: Request) -> None:
         if req.cache is not None:
@@ -60,9 +128,9 @@ class ModelRunner:
         ids: list[int] = []
         pos: list[int] = []
         for r in batch.requests:
-            if prefill:
-                ids += r.prompt_ids
-                pos += range(len(r.prompt_ids))
+            if prefill:  # prompt + output: a preempted request resumes where it stopped
+                ids += r.prompt_ids + r.output_ids
+                pos += range(r.seq_len)
             else:
                 ids.append(r.output_ids[-1])
                 pos.append(len(r.prompt_ids) + len(r.output_ids) - 1)

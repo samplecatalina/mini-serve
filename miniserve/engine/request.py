@@ -1,12 +1,19 @@
 """Request state machine.
 
     WAITING --> PREFILL --> DECODE --> FINISHED
-       |           |          |
-       +-----------+----------+-----> ABORTED
+       ^                      |
+       +----- preempted ------+
+
+    WAITING / PREFILL / DECODE --> ABORTED
 
 PREFILL is the step in which the prompt is run; the first output token is
 sampled at the end of it, so a request can finish straight from PREFILL (stop
 token or ``max_new_tokens == 1``).
+
+A preempted request (DECODE -> WAITING) loses its KV cache but keeps its
+output. When it is admitted again, its prefill runs prompt + output, and the
+logits of the last position are exactly those the interrupted decode step
+would have produced, so generation continues where it stopped.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ class RequestState(enum.Enum):
 _TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED}),
     RequestState.PREFILL: frozenset({RequestState.DECODE, RequestState.FINISHED, RequestState.ABORTED}),
-    RequestState.DECODE: frozenset({RequestState.FINISHED, RequestState.ABORTED}),
+    RequestState.DECODE: frozenset({RequestState.FINISHED, RequestState.ABORTED, RequestState.WAITING}),
     RequestState.FINISHED: frozenset(),
     RequestState.ABORTED: frozenset(),
 }
@@ -59,6 +66,7 @@ class Request:
     # KV storage (a block table, or a contiguous cache on the reference path);
     # owned by the model runner between admission and release.
     cache: BlockTable | ContiguousKVCache | None = None
+    num_preemptions: int = 0
 
     def __post_init__(self):
         if not self.prompt_ids:
@@ -72,6 +80,11 @@ class Request:
     @property
     def is_done(self) -> bool:
         return self.state in (RequestState.FINISHED, RequestState.ABORTED)
+
+    @property
+    def seq_len(self) -> int:
+        """Tokens a prefill of this request runs: the prompt plus any output kept across a preemption."""
+        return len(self.prompt_ids) + len(self.output_ids)
 
     @property
     def max_len(self) -> int:

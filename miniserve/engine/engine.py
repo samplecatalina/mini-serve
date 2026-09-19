@@ -19,14 +19,27 @@ from miniserve.model.qwen3 import Qwen3ForCausalLM
 class Engine:
     def __init__(
         self,
-        model: Qwen3ForCausalLM,
+        model: Qwen3ForCausalLM | None,
         max_running: int = 64,
         max_prefill_tokens: int = 8192,
         attention: str = "paged",
-        num_kv_blocks: int = 1024,
+        kv_pool_tokens: int | None = None,
+        runner: ModelRunner | None = None,
     ):
-        self.runner = ModelRunner(model, attention=attention, num_kv_blocks=num_kv_blocks)
-        self.scheduler = Scheduler(max_running, max_prefill_tokens)
+        """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
+        ``runner``: use this model runner instead of building one for ``model``."""
+        if runner is None:
+            runner = ModelRunner(
+                model, attention=attention, kv_pool_tokens=kv_pool_tokens, max_prefill_tokens=max_prefill_tokens
+            )
+        self.runner = runner
+        # With a paged pool the scheduler budgets KV blocks and preempts through the runner.
+        self.scheduler = Scheduler(
+            max_running,
+            max_prefill_tokens,
+            allocator=runner.allocator,
+            release=runner.release if runner.allocator is not None else None,
+        )
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
         # Called with (batch, logits) before sampling; used by diagnostics.
