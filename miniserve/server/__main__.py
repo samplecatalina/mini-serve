@@ -11,9 +11,10 @@ import logging
 from pathlib import Path
 
 from miniserve.engine.cli import add_engine_args, engine_kwargs
+from miniserve.engine.describe import engine_description, runtime_description
 from miniserve.engine.engine import Engine
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
-from miniserve.model.weights import QWEN3_0_6B, load_config, load_weights, model_path
+from miniserve.model.weights import QWEN3_0_6B, ModelSpec, load_config, load_weights, model_path
 from miniserve.server.app import build_app
 from miniserve.server.async_engine import AsyncEngine
 from miniserve.server.tokenizer import ThreadPoolTokenizer
@@ -32,16 +33,26 @@ def context_len(engine: Engine, cfg: dict) -> int:
     return n if a is None else min(n, a.num_blocks * a.block_size)
 
 
-def build_server(engine: Engine, path: Path, served_model_name: str, tokenizer_workers: int = 1):
+def build_server(engine: Engine, path: Path, served_model_name: str, tokenizer_workers: int = 1,
+                 spec: ModelSpec = QWEN3_0_6B):
     """The FastAPI app for an engine over the model at ``path``."""
     from transformers import AutoTokenizer
 
     tokenizer = ThreadPoolTokenizer(AutoTokenizer.from_pretrained(path), tokenizer_workers)
+    # Read the configuration before the engine thread starts: afterwards the engine
+    # belongs to that thread, and these values do not change while the server runs.
+    info = dict(
+        server="miniserve",
+        model=dict(repo_id=spec.repo_id, revision=spec.revision, path=str(path)),
+        engine=engine_description(engine),
+        runtime=runtime_description(),
+    )
     return build_app(
         AsyncEngine(engine, tokenizer),
         model_name=served_model_name,
         context_len=context_len(engine, load_config(path)),
         stop_token_ids=stop_token_ids(path),
+        server_info=info,
     )
 
 

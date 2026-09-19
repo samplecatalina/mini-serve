@@ -40,8 +40,11 @@ def build_app(
     model_name: str,
     context_len: int,
     stop_token_ids: frozenset[int],
+    server_info: dict | None = None,
 ) -> FastAPI:
-    """``context_len``: bound on prompt + output tokens of one request (model context and KV pool)."""
+    """``context_len``: bound on prompt + output tokens of one request (model context and KV pool).
+    ``server_info``: the effective configuration, taken before the engine thread starts
+    and served as it was; it does not change while the server runs."""
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -71,6 +74,16 @@ def build_app(
         if engine.dead is not None:
             return _error(503, f"engine stopped: {engine.dead!r}", "server_error")
         return {"status": "ok"}
+
+    @app.get("/server_info")
+    async def _server_info():  # not `server_info`: that name is the parameter this reads
+        """What this server is actually running: the settings as they ended up, the
+        model it loaded and the software underneath. A benchmark records this rather
+        than the command line, because several settings (the KV pool size, the chunked
+        prefill budget, the captured graph batch sizes) are decided by the engine."""
+        if server_info is None:
+            return _error(503, "this server was built without a configuration record", "server_error")
+        return dict(server_info, served_model_name=model_name, context_len=context_len)
 
     @app.get("/v1/models")
     async def models():

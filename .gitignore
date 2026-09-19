@@ -7,3 +7,4 @@ __pycache__/
 build/
 # Nsight Systems exports (regenerated from .nsys-rep)
 *.sqlite
+.preflight.json

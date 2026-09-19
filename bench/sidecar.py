@@ -248,3 +248,29 @@ def write_sidecar(path: str, record: dict) -> None:
         raise PreflightError(f"sidecar is missing {missing}; refusing to write results")
     with open(path, "w") as f:
         json.dump(record, f, indent=2, ensure_ascii=False)
+
+
+def main() -> int:
+    """``python -m bench.sidecar [path]``: check the conditions and record them.
+
+    A benchmark that starts its own server cannot run this itself: by the time
+    the server answers, the model is on the GPU and "the GPU is idle" is no
+    longer checkable. So it runs first, on its own, and the run that follows is
+    handed what it found.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description="preflight the GPU and print what it found as JSON")
+    ap.add_argument("out", nargs="?", help="write here as well as to stdout")
+    args = ap.parse_args()
+    record = preflight()
+    text = json.dumps(record)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text)
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
