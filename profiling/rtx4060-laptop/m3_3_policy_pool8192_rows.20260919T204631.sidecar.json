@@ -1,0 +1,245 @@
+{
+  "run_id": "20260919T204631",
+  "config": {
+    "max_running": 64,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 8192,
+    "seed": 0,
+    "disable_radix": false,
+    "chunked_prefill_size": null,
+    "schedule_policy": "fcfs",
+    "disable_overlap": false,
+    "disable_cuda_graph": false,
+    "cuda_graph_max_bs": null,
+    "workload": "policy",
+    "groups": 16,
+    "per_group": 8,
+    "prefix_len": 512,
+    "suffix_len": 32,
+    "output_len": 64,
+    "num_long": 8,
+    "long_len": 3072,
+    "long_output_len": 512,
+    "short_len": 256,
+    "long_fraction": 0.25,
+    "short_output_len": 32,
+    "arrival_rate": 0.0,
+    "workload_seed": 0,
+    "ablate": "policy",
+    "rounds": 1,
+    "arms": null,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 90.0,
+    "out": "m3_3_policy_pool8192_rows",
+    "allow_dirty": false,
+    "results_dir": "profiling/rtx4060-laptop",
+    "engine": {
+      "max_running": 64,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 8192,
+      "seed": 0,
+      "radix": true,
+      "chunked_prefill_size": null,
+      "cuda_graph": true,
+      "overlap": true,
+      "schedule_policy": "fcfs",
+      "cuda_graph_max_bs": null
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 536867328,
+      "free_bytes": 5872025600,
+      "total_bytes": 8585216000,
+      "block_bytes": 1835008,
+      "max_blocks": 2616,
+      "num_blocks": 512,
+      "graph_buckets": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64
+      ],
+      "graph_bytes": 107355648,
+      "graph_capture_s": 0.66
+    }
+  },
+  "environment": {
+    "git_commit": "d8f69f1dea1ec22e7d7b94c9c632b701864fae80",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.47",
+    "cpu": "AMD Ryzen 9 7945HX with Radeon Graphics"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 62460.090677955,
+      "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "sm_mhz": 210,
+      "mem_mhz": 6001,
+      "temp_c": 57,
+      "power_w": 10.56,
+      "power_limit_w": 131.44,
+      "reasons": "0x0000000000000001",
+      "util": 1,
+      "mem_used_mib": 1200
+    },
+    "idle_power_limit_w": [
+      115.0,
+      115.0,
+      120.93,
+      125.61,
+      129.65,
+      131.44
+    ],
+    "power_max_limit_w": 140.0,
+    "host": {
+      "ac_power": true,
+      "power_scheme": "52521609-efc9-4268-b9ba-67dea73f18b2",
+      "high_performance": true
+    }
+  },
+  "warmup": {
+    "seconds": 16.6,
+    "runs": 1,
+    "gpu": {
+      "num_samples": 24,
+      "sm_mhz": {
+        "min": 2505,
+        "max": 2520,
+        "mean": 2505.62
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 59,
+        "max": 68,
+        "mean": 63.71
+      },
+      "power_w": {
+        "min": 64.86,
+        "max": 90.25,
+        "mean": 71.05
+      },
+      "power_limit_w": {
+        "min": 124.49,
+        "max": 127.96,
+        "mean": 126.42
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "policy_cache",
+      "num_samples": 28,
+      "sm_mhz": {
+        "min": 2505,
+        "max": 2520,
+        "mean": 2505.54
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 63,
+        "max": 68,
+        "mean": 64.71
+      },
+      "power_w": {
+        "min": 23.93,
+        "max": 88.68,
+        "mean": 68.05
+      },
+      "power_limit_w": {
+        "min": 117.39,
+        "max": 127.42,
+        "mean": 123.56
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "policy_sjf",
+      "num_samples": 34,
+      "sm_mhz": {
+        "min": 2520,
+        "max": 2520,
+        "mean": 2520.0
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 60,
+        "max": 69,
+        "mean": 64.44
+      },
+      "power_w": {
+        "min": 23.6,
+        "max": 91.05,
+        "mean": 66.56
+      },
+      "power_limit_w": {
+        "min": 116.65,
+        "max": 127.39,
+        "mean": 125.02
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "run": 2,
+      "arm": "policy_fcfs",
+      "num_samples": 35,
+      "sm_mhz": {
+        "min": 2505,
+        "max": 2520,
+        "mean": 2506.29
+      },
+      "mem_mhz": {
+        "min": 8001,
+        "max": 8001,
+        "mean": 8001.0
+      },
+      "temp_c": {
+        "min": 61,
+        "max": 68,
+        "mean": 64.49
+      },
+      "power_w": {
+        "min": 23.42,
+        "max": 78.11,
+        "mean": 65.27
+      },
+      "power_limit_w": {
+        "min": 125.06,
+        "max": 127.9,
+        "mean": 126.58
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000"
+      ]
+    }
+  ]
+}
