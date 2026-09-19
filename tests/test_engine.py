@@ -3,8 +3,11 @@
 CPU tests cover the state machine and the scheduler. GPU tests check that the
 engine reproduces single-request greedy decoding:
 
-- one request alone in the engine runs the same shapes as the reference path,
-  so its output must be token-exact;
+- on the contiguous (reference) attention path, one request alone in the
+  engine runs the same shapes as the reference, so its output must be
+  token-exact;
+- the paged path uses FlashInfer kernels, so even a single request is held to
+  the tolerance rules below rather than bitwise equality;
 - under concurrent load, batching changes GEMM shapes and BF16 logits can move
   by an ulp. A sequence may then diverge from the reference only where the
   reference top-1/top-2 logit gap is at most ``EPS``; token comparison of that
@@ -22,9 +25,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+from miniserve.cache.block_allocator import OutOfBlocks
 from miniserve.engine.engine import Engine
 from miniserve.engine.request import InvalidTransition, Request, RequestState, SamplingParams
-from miniserve.engine.scheduler import Phase, Scheduler
+from miniserve.engine.scheduler import Batch, Phase, Scheduler
 from prompts import PROMPTS, encode
 
 # Largest reference logit gap tolerated for a batched token. Measured on
@@ -33,6 +37,7 @@ from prompts import PROMPTS, encode
 # 0.25 either; EPS keeps a 2x margin.
 EPS = 0.5
 STOP_IDS = frozenset({151645, 151643})
+ATTENTION = ["contiguous", "paged"]
 
 
 def _req(rid: int, n_prompt: int, max_new: int = 4) -> Request:
@@ -237,16 +242,89 @@ def _check_margins(name, model, prompt, tokens) -> float:
     return m[worst]
 
 
+def _assert_no_leak(eng):
+    if eng.runner.attention == "paged":
+        a = eng.runner.allocator
+        assert a.num_free == a.num_blocks
+        a.check_invariants()
+
+
+def _run(eng, reference, schedule):
+    """Drive the engine; ``schedule`` maps step -> prompt names arriving before that step."""
+    reqs, step = {}, 0
+    while eng.has_unfinished or step <= max(schedule):
+        for name in schedule.get(step, []):
+            ids, n, _, _ = reference[name]
+            reqs[name] = eng.add_request(ids, SamplingParams(n, STOP_IDS))
+        eng.step()
+        step += 1
+    return reqs, step
+
+
+def _check_all(label, model, reference, reqs) -> tuple[dict, float]:
+    diverged, worst = {}, 0.0
+    for name, r in reqs.items():
+        assert r.state is RequestState.FINISHED and r.cache is None
+        ids, _, ref, gaps = reference[name]
+        pos = _check_against_reference(name, r.output_ids, ref, gaps)
+        if pos is not None:
+            diverged[name] = (pos, gaps[pos])
+        worst = max(worst, _check_margins(name, model, ids, r.output_ids))
+    print(
+        f"\n[{label}] diverged {len(diverged)}/{len(reqs)} (position, reference gap): {diverged}; "
+        f"max teacher-forced margin {worst}"
+    )
+    return diverged, worst
+
+
 @pytest.mark.gpu
 @pytest.mark.slow
 @pytest.mark.parametrize("name", list(PROMPTS))
-def test_single_request_token_exact(name, model, reference):
-    """Alone in the engine, a request runs the same shapes as the reference path."""
+def test_single_request_contiguous_token_exact(name, model, reference):
+    """Alone in the engine on the reference attention path, a request runs the same shapes as the reference."""
     ids, n, ref, _ = reference[name]
-    eng = Engine(model)
+    eng = Engine(model, attention="contiguous")
     [ours] = eng.generate([ids], SamplingParams(n, STOP_IDS))
     assert ours == ref
     assert not eng.has_unfinished and not eng.requests
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_single_request_paged(model, reference):
+    """Each anchor prompt alone in the engine on the paged path, within the tolerance rules."""
+    eng = Engine(model, attention="paged")
+    reqs = {}
+    for name in PROMPTS:
+        reqs.update(_run(eng, reference, {0: [name]})[0])
+        _assert_no_leak(eng)
+    _check_all("paged single", model, reference, reqs)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_paged_prefill_logits_close(model, reference):
+    """Model level: one paged (FlashInfer) prefill over all prompts vs each prompt alone on the reference path."""
+    prompts = [reference[k][0] for k in PROMPTS]
+    eng = Engine(model, attention="paged")
+    reqs = [Request(i, p, SamplingParams(1)) for i, p in enumerate(prompts)]
+    for r in reqs:
+        r.transition(RequestState.PREFILL)
+        eng.runner.allocate(r)
+    paged = eng.runner.forward(Batch(Phase.PREFILL, reqs)).float()
+    dev = model.device
+    alone = torch.stack(
+        [model.forward(torch.tensor(p, device=dev), torch.arange(len(p), device=dev), model.new_cache(len(p))) for p in prompts]
+    ).float()
+    max_diff = (paged - alone).abs().max().item()
+    print(f"\npaged batched vs reference single prefill over {len(prompts)} prompts: max|d| = {max_diff}")
+    assert max_diff < 1.0, max_diff
+    top2 = torch.topk(alone, 2, dim=-1).values
+    decisive = (top2[:, 0] - top2[:, 1]) > EPS
+    assert torch.equal(paged.argmax(-1)[decisive], alone.argmax(-1)[decisive])
+    for r in reqs:
+        eng.runner.release(r)
+    _assert_no_leak(eng)
 
 
 @pytest.mark.gpu
@@ -278,40 +356,51 @@ def test_batched_prefill_logits_close(model, reference):
 
 @pytest.mark.gpu
 @pytest.mark.slow
+@pytest.mark.parametrize("attention", ATTENTION)
 @pytest.mark.parametrize("arrival", ["all_at_once", "staggered"])
-def test_concurrent_matches_reference(arrival, model, reference):
+def test_concurrent_matches_reference(arrival, attention, model, reference):
     """Mixed concurrent load: prefills of several prompts and decode batches of varying size."""
     names = list(PROMPTS)
-    # step -> names arriving before that step
     schedule = {0: names} if arrival == "all_at_once" else {0: names[:2], 3: names[2:4], 7: names[4:5], 20: names[5:]}
-    eng = Engine(model)
-    reqs, step = {}, 0
-    while eng.has_unfinished or step <= max(schedule):
-        for name in schedule.get(step, []):
-            ids, n, _, _ = reference[name]
-            reqs[name] = eng.add_request(ids, SamplingParams(n, STOP_IDS))
-        eng.step()
-        step += 1
-
-    diverged, worst = {}, 0.0
-    for name, r in reqs.items():
-        assert r.state is RequestState.FINISHED and r.cache is None
-        ids, _, ref, gaps = reference[name]
-        pos = _check_against_reference(name, r.output_ids, ref, gaps)
-        if pos is not None:
-            diverged[name] = (pos, gaps[pos])
-        worst = max(worst, _check_margins(name, model, ids, r.output_ids))
-    print(
-        f"\n[{arrival}] {step} steps; diverged {len(diverged)}/{len(reqs)} (position, reference gap): {diverged}; "
-        f"max teacher-forced margin {worst}"
-    )
+    eng = Engine(model, attention=attention)
+    reqs, step = _run(eng, reference, schedule)
+    _check_all(f"{attention} {arrival}, {step} steps", model, reference, reqs)
+    _assert_no_leak(eng)
 
 
 @pytest.mark.gpu
 @pytest.mark.slow
-def test_abort_mid_decode(model, reference):
+def test_paged_fragmented_pool(model, reference):
+    """Requests get scattered, descending physical blocks; attention must follow the block tables."""
+    eng = Engine(model, attention="paged", num_kv_blocks=512)
+    a = eng.runner.allocator
+    held = a.allocate(a.num_blocks)
+    a.free(held[::2])  # every other block free; LIFO hands them out in descending order
+    reqs, _ = _run(eng, reference, {0: list(PROMPTS)})
+    _check_all("paged fragmented", model, reference, reqs)
+    a.free(held[1::2])
+    _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_paged_pool_exhaustion_changes_nothing(model, reference):
+    eng = Engine(model, attention="paged", num_kv_blocks=8)  # 128 tokens
+    ids = reference["long_en"][0]  # 563 tokens
+    r = eng.add_request(ids, SamplingParams(4, STOP_IDS))
+    with pytest.raises(OutOfBlocks):
+        eng.step()
+    assert r.cache.blocks == [] and eng.runner.allocator.num_free == 8
+    eng.abort(r.rid)
+    _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("attention", ATTENTION)
+def test_abort_mid_decode(attention, model, reference):
     names = ["short_en", "code", "zh"]
-    eng = Engine(model)
+    eng = Engine(model, attention=attention)
     reqs = {k: eng.add_request(reference[k][0], SamplingParams(reference[k][1], STOP_IDS)) for k in names}
     for _ in range(10):
         eng.step()
@@ -327,3 +416,41 @@ def test_abort_mid_decode(model, reference):
         _check_against_reference(k, reqs[k].output_ids, reference[k][2], reference[k][3])
         _check_margins(k, model, reference[k][0], reqs[k].output_ids)
     assert len(victim.output_ids) == 10
+    _assert_no_leak(eng)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("attention", ATTENTION)
+def test_positions_contract(attention, model, reference, monkeypatch):
+    """Exact positions fed to the model at every step.
+
+    Token-level checks are nearly blind to a uniform position shift of all
+    decode tokens: RoPE is relative, so the model sees what looks like one
+    extra gap between prompt and output and keeps producing near-argmax tokens.
+    """
+    seen = []
+    inner = model.forward_with
+
+    def spy(input_ids, positions, attn, seq_lens):
+        seen.append(positions.tolist())
+        return inner(input_ids, positions, attn, seq_lens)
+
+    monkeypatch.setattr(model, "forward_with", spy)
+    eng = Engine(model, attention=attention)
+    names = ["short_en", "code", "zh"]
+    for k in names[:2]:
+        eng.add_request(reference[k][0], SamplingParams(6, STOP_IDS))
+    step = 0
+    while eng.has_unfinished:
+        if step == 2:
+            eng.add_request(reference[names[2]][0], SamplingParams(6, STOP_IDS))
+        batch = eng.step()
+        if batch.phase is Phase.PREFILL:
+            expected = [p for r in batch.requests for p in range(len(r.prompt_ids))]
+        else:  # the token just fed was the previous last output
+            expected = [len(r.prompt_ids) + len(r.output_ids) - 2 for r in batch.requests]
+        assert seen[-1] == expected, f"step {step} ({batch.phase.name})"
+        step += 1
+    assert len(seen) == step
+    _assert_no_leak(eng)

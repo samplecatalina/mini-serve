@@ -14,6 +14,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+from miniserve.cache.block_table import BlockTable
 from miniserve.model.qwen3 import ContiguousKVCache
 
 
@@ -55,8 +56,9 @@ class Request:
     params: SamplingParams
     output_ids: list[int] = field(default_factory=list)
     state: RequestState = RequestState.WAITING
-    # Owned by the model runner between admission and release.
-    cache: ContiguousKVCache | None = None
+    # KV storage (a block table, or a contiguous cache on the reference path);
+    # owned by the model runner between admission and release.
+    cache: BlockTable | ContiguousKVCache | None = None
 
     def __post_init__(self):
         if not self.prompt_ids:

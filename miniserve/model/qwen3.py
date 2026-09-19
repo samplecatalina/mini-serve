@@ -1,9 +1,10 @@
-"""Qwen3 dense decoder, reference path.
+"""Qwen3 dense decoder.
 
 Plain PyTorch, with the operation order and precision of every step mirroring
 Hugging Face transformers (``modeling_qwen3.py`` with the SDPA attention
-backend). The goal is bitwise-identical logits, so that greedy decoding matches
-the HF reference token for token. Faster kernels are compared against this path.
+backend). Attention is pluggable (``miniserve.model.attention``); with
+``ContiguousAttention`` this is the reference path, whose logits are
+bitwise-identical to HF. Faster backends are compared against it.
 
 Tokens are flattened: activations are ``[num_tokens, hidden]`` with no batch
 dimension, and ``positions`` gives each token's absolute position.
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+
+from miniserve.model.attention import AttentionBackend, ContiguousAttention
 
 
 @dataclass(frozen=True)
@@ -103,13 +106,7 @@ class Qwen3ForCausalLM:
         return emb.cos().to(self.dtype), emb.sin().to(self.dtype)
 
     def _attention(
-        self,
-        i: int,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        caches: list[ContiguousKVCache],
-        seq_lens: list[int],
+        self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, attn: AttentionBackend
     ) -> torch.Tensor:
         cfg, w, p = self.cfg, self.w, f"model.layers.{i}.self_attn."
         t = x.shape[0]
@@ -123,28 +120,17 @@ class Qwen3ForCausalLM:
         q = q * c + _rotate_half(q) * s
         k = k * c + _rotate_half(k) * s
 
-        # Projections run over all tokens of the batch at once; attention runs
-        # per sequence, each against its own contiguous cache.
-        outs = []
-        for cache, qs, ks, vs in zip(caches, q.split(seq_lens), k.split(seq_lens), v.split(seq_lens)):
-            k_all, v_all = cache.write(i, ks, vs)
-            # SDPA expects [batch, heads, seq, head_dim].
-            o = F.scaled_dot_product_attention(
-                qs.transpose(0, 1).unsqueeze(0),
-                k_all.transpose(0, 1).unsqueeze(0),
-                v_all.transpose(0, 1).unsqueeze(0),
-                is_causal=qs.shape[0] > 1,
-                scale=cfg.head_dim**-0.5,
-                enable_gqa=True,
-            )
-            outs.append(o.squeeze(0).transpose(0, 1))
-        out = outs[0] if len(outs) == 1 else torch.cat(outs)
+        out = attn.attend(i, q, k, v)
         return F.linear(out.reshape(t, cfg.num_heads * cfg.head_dim), w[p + "o_proj.weight"])
 
     def _mlp(self, i: int, x: torch.Tensor) -> torch.Tensor:
         w, p = self.w, f"model.layers.{i}.mlp."
         gate = F.silu(F.linear(x, w[p + "gate_proj.weight"]))
         return F.linear(gate * F.linear(x, w[p + "up_proj.weight"]), w[p + "down_proj.weight"])
+
+    @property
+    def attn_scale(self) -> float:
+        return self.cfg.head_dim**-0.5
 
     @torch.inference_mode()
     def forward(
@@ -154,11 +140,12 @@ class Qwen3ForCausalLM:
         cache: ContiguousKVCache,
         all_logits: bool = False,
     ) -> torch.Tensor:
-        """Run ``input_ids`` (the next tokens of the sequence in ``cache``).
+        """Run ``input_ids`` (the next tokens of the sequence in ``cache``) on the reference path.
 
         Returns logits ``[vocab]`` for the last token, or ``[T, vocab]``.
         """
-        h = self._hidden(input_ids, positions, [cache], [input_ids.shape[0]])
+        n = input_ids.shape[0]
+        h = self._hidden(input_ids, positions, ContiguousAttention([cache], [n], self.attn_scale), [n])
         h = _rms_norm(h if all_logits else h[-1:], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
         logits = F.linear(h, self.w["lm_head.weight"])
         return logits if all_logits else logits[0]
@@ -171,15 +158,27 @@ class Qwen3ForCausalLM:
         caches: list[ContiguousKVCache],
         seq_lens: list[int],
     ) -> torch.Tensor:
-        """Run several sequences in one pass.
+        """Several sequences in one pass on the reference path (one contiguous cache each).
+
+        With a single sequence this runs exactly the same operations as :meth:`forward`.
+        """
+        return self.forward_with(input_ids, positions, ContiguousAttention(caches, seq_lens, self.attn_scale), seq_lens)
+
+    @torch.inference_mode()
+    def forward_with(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn: AttentionBackend,
+        seq_lens: list[int],
+    ) -> torch.Tensor:
+        """Run several sequences in one pass with the given attention backend.
 
         ``input_ids`` and ``positions`` hold the new tokens of all sequences
-        concatenated; sequence ``b`` contributes ``seq_lens[b]`` tokens and
-        extends ``caches[b]``. Returns logits ``[len(caches), vocab]`` for the
-        last token of each sequence. With a single sequence this runs exactly
-        the same operations as :meth:`forward`.
+        concatenated; sequence ``b`` contributes ``seq_lens[b]`` tokens.
+        Returns logits ``[len(seq_lens), vocab]`` for the last token of each sequence.
         """
-        h = self._hidden(input_ids, positions, caches, seq_lens)
+        h = self._hidden(input_ids, positions, attn, seq_lens)
         last = torch.tensor(seq_lens, device=h.device).cumsum(0) - 1
         h = _rms_norm(h[last], self.w["model.norm.weight"], self.cfg.rms_norm_eps)
         return F.linear(h, self.w["lm_head.weight"])
@@ -188,28 +187,20 @@ class Qwen3ForCausalLM:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        caches: list[ContiguousKVCache],
+        attn: AttentionBackend,
         seq_lens: list[int],
     ) -> torch.Tensor:
-        """Decoder stack; returns final hidden states ``[num_tokens, hidden]`` before the last norm.
-
-        ``is_causal`` for multi-token sequences assumes their cache was empty
-        (a prefill); extending a non-empty cache by several tokens needs a
-        proper offset mask and is not supported by this reference path.
-        """
+        """Decoder stack; returns final hidden states ``[num_tokens, hidden]`` before the last norm."""
         cfg, w = self.cfg, self.w
-        if len(caches) != len(seq_lens) or sum(seq_lens) != input_ids.shape[0]:
-            raise ValueError(f"seq_lens {seq_lens} do not match {input_ids.shape[0]} tokens / {len(caches)} caches")
-        if any(n > 1 and c.length != 0 for c, n in zip(caches, seq_lens)):
-            raise NotImplementedError("multi-token forward on a non-empty cache")
+        if sum(seq_lens) != input_ids.shape[0]:
+            raise ValueError(f"seq_lens {seq_lens} do not match {input_ids.shape[0]} tokens")
         cos, sin = self._rope(positions)
 
         h = F.embedding(input_ids, w["model.embed_tokens.weight"])
         for i in range(cfg.num_layers):
             p = f"model.layers.{i}."
             x = _rms_norm(h, w[p + "input_layernorm.weight"], cfg.rms_norm_eps)
-            h = h + self._attention(i, x, cos, sin, caches, seq_lens)
+            h = h + self._attention(i, x, cos, sin, attn)
             h = h + self._mlp(i, _rms_norm(h, w[p + "post_attention_layernorm.weight"], cfg.rms_norm_eps))
-        for cache, n in zip(caches, seq_lens):
-            cache.length += n
+        attn.finish()
         return h

@@ -17,8 +17,15 @@ from miniserve.model.qwen3 import Qwen3ForCausalLM
 
 
 class Engine:
-    def __init__(self, model: Qwen3ForCausalLM, max_running: int = 64, max_prefill_tokens: int = 8192):
-        self.runner = ModelRunner(model)
+    def __init__(
+        self,
+        model: Qwen3ForCausalLM,
+        max_running: int = 64,
+        max_prefill_tokens: int = 8192,
+        attention: str = "paged",
+        num_kv_blocks: int = 1024,
+    ):
+        self.runner = ModelRunner(model, attention=attention, num_kv_blocks=num_kv_blocks)
         self.scheduler = Scheduler(max_running, max_prefill_tokens)
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
