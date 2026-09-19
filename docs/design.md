@@ -116,4 +116,4 @@ L40S and the 4060 share the same SM architecture constants, so code written loca
 | M4 | Benchmarks and three ablations on L40S; local regression gate | Every plotted line traces to a row in `results/` |
 | M5 | C++ core; two-model speculative decoding | C++ backend passes the same tests as the Python reference; spec decoding reported with acceptance rate and large-batch regression |
 
-Status: M0 not started. Numbers will appear in `results/` and be discussed in `optimization-log.md` as they are measured.
+Status: M0 and M1 complete (correctness only; no performance numbers yet). Numbers will appear in `results/` and be discussed in `optimization-log.md` as they are measured.
