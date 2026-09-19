@@ -20,6 +20,7 @@ Engine-level measurements on an RTX 4060 Laptop GPU (Qwen3-0.6B, BF16, 32k-token
 | Overlap scheduling (with CUDA Graphs) | 64 × 1088-token prompts at once | 543 vs 528 output tok/s |
 | Overlap scheduling (with CUDA Graphs) | 4 × 1088-token prompts at once, 256 output tokens | 364 vs 358 output tok/s; TTFT p50 238 vs 229 ms |
 | Overlap scheduling (without CUDA Graphs) | same | 203 vs 190 output tok/s |
+| Overlap scheduling (with CUDA Graphs) | 4 req/s, 8 long prompts among 64 | ITL p50 8.55 vs 8.73 ms, ITL p99 27 vs 29 ms; TTFT p50 39 vs 31 ms |
 
 CUDA Graph memory: 7 graphs (batch sizes 1, 2, 4, …, 64) share one memory pool of about 0.1 GB (107,355,648 bytes in `m3_1_cuda_graph` runs, captured in 0.45 s), plus one 1.75 MiB KV block for padding rows; the KV pool is sized before capture and the graphs use the memory it leaves free.
 
