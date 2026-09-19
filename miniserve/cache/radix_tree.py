@@ -80,6 +80,27 @@ class RadixTree:
         node, num_blocks = self._walk(tokens)
         return node, self._path_blocks(node, num_blocks)
 
+    def prefix_len(self, tokens: Sequence[int]) -> int:
+        """Tokens of the longest cached prefix of ``tokens`` in whole blocks, without changing the
+        tree (no split, no access time): a lookup that only ranks requests must not affect eviction."""
+        bs = self.block_size
+        limit = len(tokens) // bs * bs
+        node, pos = self.root, 0
+        while pos < limit:
+            child = node.children.get(tuple(tokens[pos : pos + bs]))
+            if child is None:
+                break
+            m = 1
+            while m < len(child.blocks) and pos + (m + 1) * bs <= limit:
+                if child.tokens[m * bs : (m + 1) * bs] != list(tokens[pos + m * bs : pos + (m + 1) * bs]):
+                    break
+                m += 1
+            pos += m * bs
+            if m < len(child.blocks):
+                break
+            node = child
+        return pos
+
     def _walk(self, tokens: Sequence[int]) -> tuple[RadixNode, int]:
         bs = self.block_size
         limit = len(tokens) // bs * bs

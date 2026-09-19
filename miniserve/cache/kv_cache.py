@@ -65,6 +65,12 @@ class KVCacheManager:
         req.num_cached_tokens = len(blocks) * self.block_size
         return req.num_cached_tokens
 
+    def cached_prefix_len(self, req) -> int:
+        """Tokens ``acquire`` would find cached for ``req`` now; changes nothing."""
+        if self.tree is None:
+            return 0
+        return self.tree.prefix_len(self._tokens(req)[: req.seq_len - 1])
+
     def abandon(self, req) -> None:
         """Undo ``acquire``: nothing was computed, nothing is inserted."""
         if req.cache_node is not None:

@@ -30,6 +30,7 @@ from collections.abc import Sequence
 import torch
 
 from miniserve.engine.model_runner import ModelRunner
+from miniserve.engine.policy import make_policy
 from miniserve.engine.request import PLACEHOLDER, Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase, Scheduler
 from miniserve.model.qwen3 import Qwen3ForCausalLM
@@ -52,6 +53,7 @@ class Engine:
         cuda_graph: bool = True,
         cuda_graph_max_bs: int | None = None,
         overlap: bool = True,
+        schedule_policy: str = "fcfs",
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
@@ -60,6 +62,7 @@ class Engine:
         ``cuda_graph``: replay captured CUDA Graphs for decode steps of up to ``cuda_graph_max_bs``
         requests (default ``max_running``; paged attention only).
         ``overlap``: launch each step before reading back the previous one.
+        ``schedule_policy``: admission order and preemption choice (``policy.py``).
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -77,7 +80,13 @@ class Engine:
         if chunked_prefill_size is None:
             chunked_prefill_size = DEFAULT_CHUNKED_PREFILL if runner.kv is not None else 0
         # With a paged pool the scheduler budgets KV blocks (and acquires cached prefixes) through it.
-        self.scheduler = Scheduler(max_running, max_prefill_tokens, kv=runner.kv, chunked_prefill_size=chunked_prefill_size)
+        self.scheduler = Scheduler(
+            max_running,
+            max_prefill_tokens,
+            kv=runner.kv,
+            chunked_prefill_size=chunked_prefill_size,
+            policy=make_policy(schedule_policy),
+        )
         self.requests: dict[int, Request] = {}  # unfinished requests by id
         self._rids = itertools.count()
         self._seeds = random.Random(seed)

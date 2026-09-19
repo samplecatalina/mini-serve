@@ -41,6 +41,7 @@ import torch
 from bench import sidecar
 from miniserve.engine.cli import add_engine_args, engine_kwargs
 from miniserve.engine.engine import Engine
+from miniserve.engine.policy import make_policy
 from miniserve.engine.request import SamplingParams
 from miniserve.engine.scheduler import Phase
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
@@ -58,14 +59,17 @@ class Workload:
     prompts: list[list[int]]
     output_lens: list[int]
     arrivals: list[float]  # seconds after start, sorted
-    long: list[bool]  # per request: one of the long prompts (``mixed``)
+    long: list[bool]  # per request: a long prompt (``mixed``) or a long output (``policy``)
 
 
 def make_workload(args, seed: int) -> Workload:
     """``shared``: groups of requests sharing a long random prefix, each with its own suffix, in
     random order. ``unique``: the same lengths with nothing shared. ``mixed``: short requests
     (``--short-len`` prompt, ``--output-len`` output) with ``--num-long`` long prompts
-    (``--long-len``, ``--long-output-len``) at random places in the arrival order."""
+    (``--long-len``, ``--long-output-len``) at random places in the arrival order. ``policy``:
+    the ``shared`` groups, each request asking for ``--short-output-len`` or (a
+    ``--long-fraction`` of them) ``--long-output-len`` tokens: prefix sharing for a cache-aware
+    order to exploit, and a spread of job sizes for shortest-job-first."""
     rng = random.Random(seed)
     n = args.groups * args.per_group
 
@@ -78,6 +82,12 @@ def make_workload(args, seed: int) -> Workload:
         prefixes = [rand(args.prefix_len) for _ in range(args.groups)]
         prompts = [prefixes[g] + rand(args.suffix_len) for g in range(args.groups) for _ in range(args.per_group)]
         rng.shuffle(prompts)
+    elif args.workload == "policy":
+        prefixes = [rand(args.prefix_len) for _ in range(args.groups)]
+        prompts = [prefixes[g] + rand(args.suffix_len) for g in range(args.groups) for _ in range(args.per_group)]
+        rng.shuffle(prompts)
+        long = [rng.random() < args.long_fraction for _ in range(n)]
+        output_lens = [args.long_output_len if lg else args.short_output_len for lg in long]
     elif args.workload == "unique":
         prompts = [rand(args.prefix_len + args.suffix_len) for _ in range(n)]
     elif args.workload == "mixed":
@@ -106,6 +116,9 @@ class RunResult:
     ttft: list[float] = field(default_factory=list)
     ttft_long: list[float] = field(default_factory=list)
     ttft_short: list[float] = field(default_factory=list)
+    e2e: list[float] = field(default_factory=list)
+    e2e_long: list[float] = field(default_factory=list)
+    e2e_short: list[float] = field(default_factory=list)
     itl: list[float] = field(default_factory=list)
     output_tokens: int = 0
     prefill_tokens_computed: int = 0
@@ -163,6 +176,8 @@ def run(eng: Engine, w: Workload) -> RunResult:
         assert len(times) == w.output_lens[k], f"request {k}: {len(times)} tokens"
         res.ttft.append(times[0] - w.arrivals[k])
         (res.ttft_long if w.long[k] else res.ttft_short).append(res.ttft[-1])
+        res.e2e.append(times[-1] - w.arrivals[k])
+        (res.e2e_long if w.long[k] else res.e2e_short).append(res.e2e[-1])
         res.itl += [b - a for a, b in zip(times, times[1:])]
     res.output_tokens = sum(w.output_lens)
     res.span_s = max(t[-1] for t in token_times) - min(w.arrivals)
@@ -184,6 +199,7 @@ ABLATIONS = {
     "chunked": ("chunk_2048", "chunk_512", "chunk_off"),
     "cuda_graph": ("graph_on", "graph_off"),
     "overlap": ("overlap_on", "overlap_off"),
+    "policy": ("policy_cache", "policy_sjf", "policy_fcfs"),
     "none": ("default",),
 }
 
@@ -196,6 +212,9 @@ def set_arm(eng: Engine, arm: str) -> None:
         kv.set_radix(False)
     elif arm == "default":
         kv.set_radix(kv.radix)  # clears the prefix cache
+    elif arm.startswith("policy_"):
+        kv.set_radix(kv.radix)
+        eng.scheduler.policy = make_policy(arm.removeprefix("policy_"))
     elif arm in ("overlap_on", "overlap_off"):
         kv.set_radix(kv.radix)
         eng.overlap = arm == "overlap_on"
@@ -227,7 +246,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_engine_args(ap)
     g = ap.add_argument_group("benchmark")
-    g.add_argument("--workload", choices=["shared", "unique", "mixed"], required=True)
+    g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy"], required=True)
     g.add_argument("--groups", type=int, default=8)
     g.add_argument("--per-group", type=int, default=8)
     g.add_argument("--prefix-len", type=int, default=1024)
@@ -237,6 +256,8 @@ def main() -> int:
     g.add_argument("--long-len", type=int, default=3072)
     g.add_argument("--long-output-len", type=int, default=16)
     g.add_argument("--short-len", type=int, default=256)
+    g.add_argument("--long-fraction", type=float, default=0.25, help="policy: share of requests with long outputs")
+    g.add_argument("--short-output-len", type=int, default=32, help="policy")
     g.add_argument("--arrival-rate", type=float, default=0.0, help="requests/s (Poisson); 0: all at once")
     g.add_argument("--workload-seed", type=int, default=0)
     g.add_argument("--ablate", choices=sorted(ABLATIONS), default="none")
@@ -313,6 +334,10 @@ def main() -> int:
                     ttft_p95_ms=round(pct(r.ttft, 95) * 1e3, 2),
                     ttft_long_p50_ms=round(pct(r.ttft_long, 50) * 1e3, 2) if r.ttft_long else "",
                     ttft_short_p50_ms=round(pct(r.ttft_short, 50) * 1e3, 2) if r.ttft_short else "",
+                    e2e_mean_ms=round(statistics.mean(r.e2e) * 1e3, 1),
+                    e2e_p99_ms=round(pct(r.e2e, 99) * 1e3, 1),
+                    e2e_short_mean_ms=round(statistics.mean(r.e2e_short) * 1e3, 1) if r.e2e_short else "",
+                    e2e_long_p99_ms=round(pct(r.e2e_long, 99) * 1e3, 1) if r.e2e_long else "",
                     itl_p50_ms=round(pct(r.itl, 50) * 1e3, 2),
                     itl_p99_ms=round(pct(r.itl, 99) * 1e3, 2),
                     itl_max_ms=round(max(r.itl) * 1e3, 2),
@@ -331,6 +356,7 @@ def main() -> int:
                     mixed_step_ms=round(statistics.mean(r.mixed_step_s) * 1e3, 2) if r.mixed_step_s else "",
                     cuda_graph=eng.runner.use_cuda_graph,
                     overlap=eng.overlap,
+                    schedule_policy=eng.scheduler.policy.name,
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
                 )
@@ -363,6 +389,7 @@ def main() -> int:
 def print_summary(rows: list[dict], arms: tuple[str, ...]) -> None:
     keys = [
         "ttft_p50_ms", "ttft_p95_ms", "ttft_long_p50_ms", "itl_p50_ms", "itl_p99_ms", "itl_max_ms",
+        "e2e_mean_ms", "e2e_p99_ms", "e2e_short_mean_ms", "e2e_long_p99_ms",
         "output_tok_s", "decode_step_ms", "mixed_step_ms", "prefill_tokens_computed", "hit_rate", "preemptions",
     ]
     keys = [k for k in keys if all(r[k] != "" for r in rows)]

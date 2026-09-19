@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from miniserve.engine.model_runner import ATTENTION_MODES
+from miniserve.engine.policy import POLICIES
 
 
 def add_engine_args(parser: argparse.ArgumentParser) -> None:
@@ -27,6 +28,13 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="tokens per step, decodes included, with prefills cut into chunks batched with decodes; "
         "0: whole prefills in prefill-only steps (default: 2048 with paged attention)",
+    )
+    g.add_argument(
+        "--schedule-policy",
+        choices=sorted(POLICIES),
+        default="fcfs",
+        help="admission order and preemption choice: fcfs, sjf (least remaining work first), "
+        "cache (longest cached prefix first)",
     )
     g.add_argument(
         "--disable-overlap",
@@ -54,5 +62,6 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         chunked_prefill_size=args.chunked_prefill_size,
         cuda_graph=not args.disable_cuda_graph,
         overlap=not args.disable_overlap,
+        schedule_policy=args.schedule_policy,
         cuda_graph_max_bs=args.cuda_graph_max_bs,
     )

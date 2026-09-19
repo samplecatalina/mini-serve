@@ -57,6 +57,28 @@ def test_match_splits_at_block_boundary():
     t.check_invariants()
 
 
+def _shape(node):
+    return (tuple(node.tokens), tuple(node.blocks), node.last_access, tuple(sorted((k, _shape(c)) for k, c in node.children.items())))
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_prefix_len_agrees_with_match_and_changes_nothing(seed):
+    """The read-only lookup schedulers rank requests with: the same length as ``match`` finds, and
+    no split node or access time left behind (ranking must not affect eviction)."""
+    rng = random.Random(seed)
+    t, a = _tree(64)
+    for _ in range(4):
+        base = [rng.randrange(1, 4) for _ in range(rng.randint(0, 20))]
+        _cache(t, a, base + [rng.randrange(1, 4) for _ in range(rng.randint(0, 12))])
+    for _ in range(10):
+        q = [rng.randrange(1, 4) for _ in range(rng.randint(0, 30))]
+        before, clock = _shape(t.root), t._clock
+        n = t.prefix_len(q)
+        assert _shape(t.root) == before and t._clock == clock
+        assert n == len(t.match(q)[1]) * BS
+    t.check_invariants()
+
+
 def test_insert_shares_prefix_and_ignores_duplicates():
     t, a = _tree()
     first = _cache(t, a, [1, 2, 3, 4, 5, 6, 7, 8])

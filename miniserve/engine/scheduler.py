@@ -26,8 +26,9 @@ those only the prefix cache holds, which can be evicted at any time.
   ``L - C`` tokens of the prefill budget. Admission stops at the first request
   that does not fit (no skipping ahead); its lookup is undone. Right after an
   admission the next decode step therefore always fits.
-- Preemption. If a decode step needs more blocks than are available, the most
-  recently admitted requests are preempted one by one until it fits: their
+- Preemption. If a decode step needs more blocks than are available, requests
+  are preempted one by one until it fits (the most recently admitted first under
+  the default policy; see ``policy.py``): their
   blocks are released (full blocks stay in the prefix cache), they keep their
   output and go back to the front of the waiting queue, to be prefilled again
   later; the prefix cache usually holds most of what they had computed.
@@ -52,6 +53,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from miniserve.cache.kv_cache import KVCacheManager
+from miniserve.engine.policy import FCFS, SchedulePolicy
 from miniserve.engine.request import Request, RequestState
 
 
@@ -107,10 +109,13 @@ class Scheduler:
         max_prefill_tokens: int = 8192,
         kv: KVCacheManager | None = None,
         chunked_prefill_size: int = 0,
+        policy: SchedulePolicy | None = None,
     ):
         """``kv``: the paged KV pool to budget against, with its prefix cache (None: no KV budget).
         ``chunked_prefill_size``: tokens per step, decode rows included, with prefills cut into
-        chunks and batched with decodes; 0 keeps whole prefills in prefill-only batches."""
+        chunks and batched with decodes; 0 keeps whole prefills in prefill-only batches.
+        ``policy``: admission order and preemption choice (default FCFS); may be replaced
+        between steps."""
         if max_running < 1 or max_prefill_tokens < 1:
             raise ValueError("max_running and max_prefill_tokens must be positive")
         if chunked_prefill_size < 0:
@@ -121,6 +126,7 @@ class Scheduler:
         self.max_running = max_running
         self.max_prefill_tokens = max_prefill_tokens
         self.kv = kv
+        self.policy: SchedulePolicy = policy if policy is not None else FCFS()
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []  # admission order
         self.num_preemptions = 0
@@ -155,8 +161,9 @@ class Scheduler:
         budget = self.max_prefill_tokens
         reserved = 0  # blocks promised to requests admitted in this call
         kv = self.kv
-        while self.waiting and len(self.running) + len(admitted) < self.max_running:
-            req = self.waiting[0]
+        for req in self.policy.order(self.waiting, kv):
+            if len(self.running) + len(admitted) >= self.max_running:
+                break
             if req.num_pending:  # its last token is not read back yet; its prefill needs it
                 break
             cached = kv.acquire(req) if kv is not None else 0
@@ -175,7 +182,7 @@ class Scheduler:
                 break
             if kv is not None:
                 reserved += need
-            self.waiting.popleft()
+            self.waiting.remove(req)
             req.transition(RequestState.PREFILL)
             admitted.append(req)
             budget -= n
@@ -194,8 +201,6 @@ class Scheduler:
             if spent:  # free victims first: they have nothing left to compute
                 victim = spent[-1]
             else:
-                # A single request always fits: add() rejects requests larger than the pool.
-                assert len(decoding) > 1, "a lone decoding request does not fit in the pool"
                 victim = self._pick_victim(decoding)
                 decoding.remove(victim)
             self._preempt(victim)
@@ -233,8 +238,9 @@ class Scheduler:
                 n = min(r.seq_len - start, budget)
                 rows.append((r, start, n))
                 budget -= n
-        while budget > 0 and self.waiting and len(self.running) < self.max_running:
-            req = self.waiting[0]
+        for req in self.policy.order(self.waiting, kv) if budget > 0 else ():
+            if budget <= 0 or len(self.running) >= self.max_running:
+                break
             if req.num_pending:  # its last token is not read back yet; its prefill needs it
                 break
             cached = kv.acquire(req)
@@ -242,7 +248,7 @@ class Scheduler:
             if need > kv.num_available - self._outstanding(self.running):
                 kv.abandon(req)
                 break
-            self.waiting.popleft()
+            self.waiting.remove(req)
             req.transition(RequestState.PREFILL)
             self.running.append(req)
             first = req.num_preemptions == 0
@@ -289,15 +295,20 @@ class Scheduler:
 
     # ------------------------------------------------------------------ preemption
 
-    def _pick_victim(self, decoding: list[Request]) -> Request:
-        """The most recently admitted request. Never the oldest, which guarantees progress."""
-        return decoding[-1]
+    def _pick_victim(self, pool: list[Request]) -> Request:
+        """The policy's choice among ``pool``, never the earliest admitted running request:
+        it always keeps its blocks, so it always makes progress."""
+        candidates = [r for r in pool if r is not self.running[0]]
+        # A single request always fits: add() rejects requests larger than the pool.
+        assert candidates, "a lone request does not fit in the pool"
+        return self.policy.pick_victim(candidates)
 
     def _preempt(self, req: Request) -> None:
         req.transition(RequestState.WAITING)
         self.kv.release(req)
         self.running.remove(req)
-        # Victims are taken newest first, so pushing each to the front keeps arrival order.
+        # FCFS takes victims newest first, so pushing each to the front keeps arrival order
+        # (other policies reorder the queue anyway).
         self.waiting.appendleft(req)
         req.num_preemptions += 1
         self.num_preemptions += 1

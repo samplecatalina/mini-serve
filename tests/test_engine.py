@@ -220,6 +220,53 @@ def test_graph_buckets():
         graph_buckets(0)
 
 
+def test_policy_orders_and_victims():
+    """FCFS keeps queue order and preempts the newest; SJF ranks by remaining prefill + possible
+    output and preempts the largest (newest among equals); cache-aware ranks by cached prefix."""
+    from miniserve.engine.policy import CacheAware, FCFS, ShortestJobFirst, remaining_work
+
+    a, b, c = _req(0, 10, 50), _req(1, 30, 5), _req(2, 3, 100)
+    assert [remaining_work(r) for r in (a, b, c)] == [60, 35, 103]
+    assert FCFS().order([a, b, c], None) == [a, b, c] and FCFS().pick_victim([a, b, c]) is c
+    assert ShortestJobFirst().order([a, b, c], None) == [b, a, c]
+    assert ShortestJobFirst().pick_victim([a, b, c]) is c
+    d = _req(3, 10, 50)  # same remaining work as a, admitted later
+    assert ShortestJobFirst().pick_victim([a, d, b]) is d
+    # A waiting request that already produced output (preempted) must prefill it again: its
+    # remaining work does not shrink with progress, only its possible output does.
+    a.output_ids = [1] * 40
+    assert remaining_work(a) == 50 + 10
+
+    kv = KVCacheManager(BlockAllocator(64, 4), radix=True)
+    warm = Request(9, list(range(1, 25)), SamplingParams(1))
+    kv.acquire(warm)
+    warm.cache.append_tokens(24)
+    kv.release(warm)  # 6 blocks of 1..24 now cached
+    x = Request(10, [7] * 20, SamplingParams(4))
+    y = Request(11, list(range(1, 13)) + [9] * 8, SamplingParams(4))  # first 12 tokens cached
+    z = Request(12, list(range(1, 25)) + [5], SamplingParams(4))  # all 24 cached
+    assert [kv.cached_prefix_len(r) for r in (x, y, z)] == [0, 12, 24]
+    assert CacheAware().order([x, y, z], kv) == [z, y, x]
+    assert CacheAware().order([x, y, z], None) == [x, y, z]
+    assert CacheAware().pick_victim([x, y, z]) is z
+
+
+def test_victims_exclude_the_earliest_admitted():
+    """Under any policy the earliest admitted running request is never preempted, even when the
+    policy would pick it (SJF: it has the most remaining work)."""
+    from miniserve.engine.policy import ShortestJobFirst
+
+    s, a = _paged_scheduler(12, policy=ShortestJobFirst())
+    big = _req(0, 4, 40)  # most remaining work, admitted first
+    small = _req(1, 4, 2)
+    s.add(big)
+    _run_batch(s.schedule(), a)
+    s.add(small)
+    _run_batch(s.schedule(), a)
+    assert s.running == [big, small]
+    assert s._pick_victim(s.running) is small
+
+
 def _paged_scheduler(num_blocks: int, block_size: int = 4, radix: bool = False, **kw) -> tuple[Scheduler, BlockAllocator]:
     a = BlockAllocator(num_blocks, block_size)
     return Scheduler(kv=KVCacheManager(a, radix), **kw), a
@@ -619,11 +666,12 @@ def test_chunks_are_cached_as_they_complete():
     _assert_no_leak(eng)
 
 
+@pytest.mark.parametrize("policy", ["fcfs", "sjf", "cache"])
 @pytest.mark.parametrize("chunk", [0, 5, 2048])
 @pytest.mark.parametrize("radix", [True, False])
 @pytest.mark.parametrize("num_blocks", [12, 24, 96])
 @pytest.mark.parametrize("seed", range(8))
-def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk):
+def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk, policy):
     """Requests built from a few shared prefixes, in a pool small enough to preempt and evict.
 
     The toy model reads every sequence's history back from the KV store through
@@ -635,7 +683,10 @@ def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk):
 
     rng = random.Random(seed)
     block_size = 4
-    eng = _toy_engine(num_blocks, block_size, max_running=8, max_prefill_tokens=40, radix=radix, chunked_prefill_size=chunk)
+    eng = _toy_engine(
+        num_blocks, block_size, max_running=8, max_prefill_tokens=40, radix=radix, chunked_prefill_size=chunk,
+        schedule_policy=policy,
+    )
     cap = num_blocks * block_size
     prefixes = [[rng.randrange(1, TOY_VOCAB) for _ in range(rng.randint(4, 17))] for _ in range(3)]
     arrivals: dict[int, list[tuple[list[int], SamplingParams]]] = {}
@@ -660,8 +711,11 @@ def test_simulated_shared_prefixes(seed, num_blocks, radix, chunk):
     st = eng.scheduler.stats
     if radix:
         assert st["first_cached"] > 0, st
-        if st["re_tokens"]:  # (a preempted request whose last token was in flight is never readmitted)
-            assert st["re_cached"] > 0, st  # readmitted requests find their own blocks
+        # Readmitted requests find their own blocks: under FCFS they go back to the front of the
+        # queue; other policies may keep them waiting until their blocks are evicted. (A preempted
+        # request whose last token was in flight is never readmitted.)
+        if st["re_tokens"] and policy == "fcfs":
+            assert st["re_cached"] > 0, st
     else:
         assert st["first_cached"] == st["re_cached"] == 0
     _assert_no_leak(eng)
@@ -1282,13 +1336,16 @@ def workload64(tokenizer, model):
 
 @pytest.mark.gpu
 @pytest.mark.slow
-@pytest.mark.parametrize("arrival,pool_tokens", [("all_at_once", 2048), ("staggered", 1536)])
-def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, model, workload64, monkeypatch):
+@pytest.mark.parametrize(
+    "arrival,pool_tokens,policy",
+    [("all_at_once", 2048, "fcfs"), ("staggered", 1536, "fcfs"), ("all_at_once", 2048, "sjf"), ("staggered", 1536, "cache")],
+)
+def test_64_concurrent_under_kv_pressure(arrival, pool_tokens, policy, model, workload64, monkeypatch):
     """64 concurrent requests of mixed length in a pool far smaller than their
     total demand. Admission control and preemption must keep every step within the pool (no
     OutOfBlocks, no OOM), the run must finish (no deadlock), preemption must actually happen, and
     every output must pass the correctness anchor, with exact positions at every step."""
-    eng = _engine(model, attention="paged", kv_pool_tokens=pool_tokens)
+    eng = _engine(model, attention="paged", kv_pool_tokens=pool_tokens, schedule_policy=policy)
     seen = _spy_positions(eng, model, monkeypatch)
     positions = _Positions()
     names = sorted(workload64)
