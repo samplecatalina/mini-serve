@@ -37,7 +37,7 @@ NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
 NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
 NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image bench-image lock shell env-check weights test bench serve profile bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif
+.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -50,6 +50,7 @@ help:
 	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench-roofline   this GPU's copy bandwidth and BF16 GEMM rate: the denominators"
+	@echo "charts     draw the ablation figures from the result rows (CHART_DEVICE=l40s)"
 	@echo "bench-decode-sharing  decode attention with and without shared KV blocks"
 	@echo "ncu-decode-sharing    one layout of it under Nsight Compute (BENCH_ARGS='--case shared --iters 3')"
 	@echo "sif        convert an image to an Apptainer image in SIF_DIR (SIF_IMAGE, SIF_NAME) for the cluster"
@@ -90,6 +91,12 @@ profile-offline:
 		$(IMAGE) /opt/nsys/target-linux-x64/nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false \
 		--capture-range=nvtx --nvtx-capture=measure --capture-range-end=stop \
 		-o $(NSYS_OUT) -f true python -m bench.offline $(BENCH_ARGS)
+
+CHART_DEVICE ?= l40s
+
+charts:
+	docker run --rm --user $(shell id -u):$(shell id -g) -v $(CURDIR):/workspace -w /workspace \
+		-e PYTHONPATH=/workspace $(BENCH_IMAGE) python -m bench.charts --device $(CHART_DEVICE)
 
 bench-roofline:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
