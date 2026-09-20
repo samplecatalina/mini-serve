@@ -82,7 +82,11 @@ arm() {
   # One arm that fails must not take the rest of a two-hour allocation with it:
   # the queue wait to redo the others costs far more than this arm's data.
   if ! start_server "$@"; then FAILED+=("$label(server)"); return 0; fi
+  # The conditions were recorded above, while the GPU was still idle. Without
+  # this the benchmark would check them itself, against a GPU that now holds the
+  # server it is about to measure, and refuse every single arm.
   if ! "${LOAD[@]}" python -m bench.serving --url "http://127.0.0.1:$PORT" --results-dir /out \
+      --preflight-json /out/m4_2_preflight.json \
       --out "$out" --label "$label" --concurrency "${conc[@]}" \
       --scenario "D(1024,256)" --max-time-per-run 2 --max-requests-per-run 4096 --warmup-s 30
   then
@@ -97,6 +101,13 @@ BIG=(--max-running 256 --cuda-graph-max-bs 256)
 
 el "=== main caliber ==="
 arm miniserve m4_2_main 1 4 32 256 -- "${BIG[@]}"
+# Tolerating a failed arm is for an arm's own trouble. If the first one fails,
+# whatever is wrong is wrong for all of them, and running fifteen more of it
+# spends the allocation to produce nothing.
+if [ ${#FAILED[@]} -gt 0 ]; then
+  el "the main caliber failed (${FAILED[*]}); the rest would fail the same way. Stopping."
+  exit 1
+fi
 
 el "=== ablation 1: decode CUDA Graph ==="
 arm graph_on  m4_2_cuda_graph 32 256 -- "${BIG[@]}"
