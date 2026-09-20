@@ -1235,7 +1235,7 @@ def test_decode_graph_matches_eager(lens, model):
     got = {b * bs + o for b, o in changed.nonzero().tolist() if b != dummy}
     assert got == {t.slot(t.num_tokens - 1) for t in tables}
     for t in tables:  # rewind the new token and run the same batch eagerly
-        t.num_tokens -= 1
+        t.rewind(1)
     runner.use_cuda_graph = False
     eager_logits = runner.forward(batch).float()
     runner.use_cuda_graph = True

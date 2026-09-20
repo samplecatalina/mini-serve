@@ -69,6 +69,7 @@ PYBIND11_MODULE(_minicore, m) {
       .def("blocks_needed", &BlockTable::blocks_needed, py::arg("n"))
       .def("append_tokens", &BlockTable::append_tokens, py::arg("n"))
       .def("slot", &BlockTable::slot, py::arg("pos"))
+      .def("rewind", &BlockTable::rewind, py::arg("n"))
       .def("tail_slots", &BlockTable::tail_slots, py::arg("n"))
       .def("release", &BlockTable::release);
 

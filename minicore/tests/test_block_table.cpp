@@ -67,6 +67,23 @@ TEST(BlockTable, TailSlotsMatchSlotOneByOne) {
   EXPECT_THROW(t.tail_slots(11), minicore::BlockIndexError);
 }
 
+TEST(BlockTable, RewindKeepsTheBlocks) {
+  BlockAllocator a(8, 4);
+  BlockTable t(&a, {});
+  t.append_tokens(5);
+  const auto slot4 = t.slot(4);
+  t.rewind(1);
+  EXPECT_EQ(t.num_tokens(), 4);
+  EXPECT_EQ(t.blocks().size(), 2u);  // the second block is still held
+  EXPECT_EQ(a.num_free(), 6);
+  EXPECT_EQ(t.blocks_needed(1), 0);
+  EXPECT_TRUE(t.append_tokens(1).empty());
+  EXPECT_EQ(t.slot(4), slot4);  // and the token lands in the same slot
+  EXPECT_THROW(t.rewind(6), minicore::BlockIndexError);
+  EXPECT_THROW(t.rewind(-1), minicore::BlockIndexError);
+  a.check_invariants();
+}
+
 TEST(BlockTable, SharedPrefixIsIncrefedAndReleasedIndependently) {
   BlockAllocator a(8, 4);
   BlockTable owner(&a, {});

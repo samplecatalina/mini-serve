@@ -35,6 +35,14 @@ std::vector<BlockId> BlockTable::append_tokens(int n) {
   return std::vector<BlockId>(blocks_.begin() + static_cast<std::ptrdiff_t>(before), blocks_.end());
 }
 
+void BlockTable::rewind(int n) {
+  if (n < 0 || n > num_tokens_) {
+    throw BlockIndexError("cannot rewind " + std::to_string(n) + " of " +
+                          std::to_string(num_tokens_) + " tokens");
+  }
+  num_tokens_ -= n;
+}
+
 std::vector<std::int64_t> BlockTable::tail_slots(int n) const {
   if (n < 0 || n > num_tokens_) {
     throw BlockIndexError("tail of " + std::to_string(n) + " tokens out of range [0, " +

@@ -64,6 +64,16 @@ class BlockTable:
             raise IndexError(f"position {pos} out of range [0, {self.num_tokens})")
         return self.blocks[pos // self.block_size] * self.block_size + pos % self.block_size
 
+    def rewind(self, n: int) -> None:
+        """Undo the append of the last ``n`` tokens, keeping the blocks.
+
+        The blocks stay because the caller is about to recompute those tokens
+        into the same slots; freeing and reallocating would hand out different ones.
+        """
+        if not 0 <= n <= self.num_tokens:
+            raise IndexError(f"cannot rewind {n} of {self.num_tokens} tokens")
+        self.num_tokens -= n
+
     def tail_slots(self, n: int) -> list[int]:
         """Slots of the last ``n`` tokens, in order: one call per request per step
         instead of one per token."""

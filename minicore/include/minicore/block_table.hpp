@@ -51,6 +51,11 @@ class BlockTable {
     return static_cast<std::int64_t>(blocks_[static_cast<std::size_t>(pos / bs)]) * bs + pos % bs;
   }
 
+  // Undo the append of the last n tokens, keeping the blocks. The blocks stay
+  // because the caller is about to recompute those tokens into the same slots;
+  // freeing and reallocating would hand out different ones.
+  void rewind(int n);
+
   // Slots of the last n tokens, in order. The hot path: one call per request
   // per step instead of one binding crossing per token.
   std::vector<std::int64_t> tail_slots(int n) const;

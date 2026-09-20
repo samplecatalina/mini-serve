@@ -197,6 +197,26 @@ def test_internal_fragmentation_bound(make):
     assert a.num_free == 64
 
 
+def test_rewind_keeps_the_blocks(make):
+    """Undoing an append must not give the blocks back: the caller recomputes those
+    tokens and has to land in the same slots (the decode-graph test relies on this)."""
+    a = make(8, 4)
+    t = a.new_table()
+    t.append_tokens(5)  # 2 blocks
+    slots = [t.slot(p) for p in range(5)]
+    t.rewind(1)
+    assert (t.num_tokens, t.num_blocks, a.num_free) == (4, 2, 6)
+    assert t.blocks_needed(1) == 0  # the block for it is still held
+    assert t.append_tokens(1) == [] and [t.slot(p) for p in range(5)] == slots
+    t.rewind(0)
+    assert t.num_tokens == 5
+    with pytest.raises(IndexError):
+        t.rewind(6)
+    with pytest.raises(IndexError):
+        t.rewind(-1)
+    a.check_invariants()
+
+
 def test_release(make):
     a = make(8, 4)
     t = a.new_table()
