@@ -33,16 +33,6 @@ from miniserve.model.transfer import CopyFence, to_device
 ATTENTION_MODES = ("paged", "contiguous")
 
 
-def _tokens(req: Request, start: int, n: int) -> list[int]:
-    """Tokens ``start .. start + n`` of ``prompt + output``, without concatenating the two."""
-    p = len(req.prompt_ids)
-    if start >= p:
-        return req.output_ids[start - p : start - p + n]
-    if start + n <= p:
-        return req.prompt_ids[start : start + n]
-    return req.prompt_ids[start:] + req.output_ids[: start + n - p]
-
-
 class ModelRunner:
     def __init__(
         self,
@@ -57,6 +47,7 @@ class ModelRunner:
         cuda_graph: bool = True,
         cuda_graph_max_bs: int | None = None,
         block_backend: str | None = None,
+        sample_rows: int | None = None,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
@@ -67,7 +58,9 @@ class ModelRunner:
         (default ``max_running``) after the pool is allocated (paged mode only); they use the
         memory the pool leaves free. ``use_cuda_graph`` switches them off and on at run time.
         ``block_backend``: implementation of the block bookkeeping (``python`` or ``cpp``);
-        default from ``MINISERVE_BLOCK_BACKEND``."""
+        default from ``MINISERVE_BLOCK_BACKEND``.
+        ``sample_rows``: rows of logits the profiled peak must hold (default ``max_running``);
+        a verify pass takes the logits of several positions per request."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
@@ -88,7 +81,9 @@ class ModelRunner:
                     cfg.num_layers, num_blocks, block_size, cfg.num_kv_heads, cfg.head_dim, model.dtype, model.device
                 )
 
-            self.kv_profile = self._profile(pool, block_size, max_prefill_tokens, max_running, kv_mem_fraction)
+            self.kv_profile = self._profile(
+                pool, block_size, max_prefill_tokens, sample_rows or max_running, kv_mem_fraction
+            )
             num_blocks = self.kv_profile["max_blocks"]
             if kv_pool_tokens is not None:
                 if kv_pool_tokens < block_size:
@@ -204,7 +199,7 @@ class ModelRunner:
         pos: list[int] = []
         for r, start, n in zip(batch.requests, batch.starts, batch.extend_lens):
             # prompt + output (a preempted request resumes), from the first token without KV
-            ids += _tokens(r, start, n)
+            ids += r.token_slice(start, n)
             pos += range(start, start + n)
         seq_lens = batch.seq_lens
         caches = [r.cache for r in batch.requests]
@@ -214,7 +209,7 @@ class ModelRunner:
         if self.attention == "paged":
             if any(t.num_tokens != s for t, s in zip(caches, batch.starts)):
                 raise RuntimeError("batch starts disagree with the block tables")
-            self._reserve(caches, seq_lens)
+            self.reserve(caches, seq_lens)
             # One call per request, not one per token: with a C++ table every
             # crossing of the binding costs more than the lookup it performs.
             slots = [s for t, n in zip(caches, seq_lens) for s in t.tail_slots(n)]
@@ -247,7 +242,37 @@ class ModelRunner:
         src = [rows[batch.requests[i].rid] for i in dst]
         return to_device(dst, torch.long, self.device), tokens.index_select(0, to_device(src, torch.long, tokens.device))
 
-    def _reserve(self, tables: list, seq_lens: list[int]) -> None:
+    def forward_tokens(
+        self,
+        tables: list,
+        ids: list[int],
+        pos: list[int],
+        qo_lens: list[int],
+        fill: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Logits ``[sum(qo_lens), vocab]``: one row per new token, not one per sequence.
+
+        ``ids`` and ``pos`` hold the new tokens of all sequences concatenated, ``qo_lens[b]``
+        of them for sequence ``b``, whose table already covers them (:meth:`reserve`). The
+        pass is always a prefill (extend) one, so it runs eagerly whatever the batch size.
+
+        ``fill = (positions in ids, tokens)``: device tensors replacing those token ids, for
+        tokens that were produced on the device and not read back (a round's proposals).
+        """
+        if self.attention != "paged":
+            raise RuntimeError("forward_tokens needs the paged attention path")
+        self.fence.wait()
+        slots = [s for t, n in zip(tables, qo_lens) for s in t.tail_slots(n)]
+        self.flashinfer.plan(True, qo_lens, tables, slots)
+        ids_t = to_device(ids, torch.long, self.device)
+        if fill is not None:
+            ids_t.index_copy_(0, *fill)
+        pos_t = to_device(pos, torch.long, self.device)
+        self.fence.mark()
+        # decode_logits keeps every position's logits; forward_with would gather the last of each.
+        return self.model.decode_logits(ids_t, pos_t, self.flashinfer)
+
+    def reserve(self, tables: list, seq_lens: list[int]) -> None:
         """Extend every table by its new tokens. If the pool is short even after evicting
         from the prefix cache, raise ``OutOfBlocks`` with the tables unchanged."""
         need = sum(t.blocks_needed(n) for t, n in zip(tables, seq_lens))

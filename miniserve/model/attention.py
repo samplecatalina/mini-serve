@@ -81,13 +81,17 @@ class FlashInferPagedAttention:
 
     WORKSPACE_BYTES = 128 * 1024 * 1024
 
-    def __init__(self, pool: KVPool, num_heads: int, scale: float):
+    def __init__(self, pool: KVPool, num_heads: int, scale: float, workspace: torch.Tensor | None = None):
+        """``workspace``: an existing scratch buffer to share instead of allocating one; every
+        wrapper built on it must run its pass before another one plans (which holds here: the
+        engine runs one pass at a time)."""
         import flashinfer
 
         self.pool = pool
         self.num_heads = num_heads
         self.scale = scale
-        workspace = torch.empty(self.WORKSPACE_BYTES, dtype=torch.uint8, device=pool.device)
+        if workspace is None:
+            workspace = torch.empty(self.WORKSPACE_BYTES, dtype=torch.uint8, device=pool.device)
         self.workspace = workspace  # shared with the decode graphs' wrappers (one pass runs at a time)
         self._prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="NHD", backend="fa2")
         # Tensor-core decode only pays off for large query groups (GQA >= 4).

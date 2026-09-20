@@ -39,13 +39,14 @@ from dataclasses import dataclass, field
 import torch
 
 from bench import sidecar
-from miniserve.engine.cli import add_engine_args, engine_kwargs
+from miniserve.engine.cli import add_engine_args, add_spec_args, engine_kwargs
 from miniserve.engine.engine import Engine
 from miniserve.engine.policy import make_policy
 from miniserve.engine.request import SamplingParams
 from miniserve.engine.scheduler import Phase
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
-from miniserve.model.weights import QWEN3_0_6B, load_config, load_weights, model_path
+from miniserve.model.weights import load_config, load_weights, model_path, spec_for
+from miniserve.spec.engine import SpecEngine
 
 VOCAB_LIMIT = 150_000  # random prompt ids stay below the special-token range
 
@@ -169,7 +170,10 @@ def run(eng: Engine, w: Workload) -> RunResult:
             res.decode_step_s.append(t_step)
         for r, k in zip(batch.requests, done):
             times = token_times[req_index[r.rid]]
-            if k > len(times):  # this step gave the request a token (a prefill chunk may not)
+            # A step gives a request no token (a prefill chunk), one, or several at once
+            # (a speculative round): the tokens of a round all arrive together, so they
+            # share its timestamp and the gaps between them are zero.
+            while k > len(times):
                 times.append(t)
     for k, times in enumerate(token_times):
         assert len(times) == w.output_lens[k], f"request {k}: {len(times)} tokens"
@@ -199,6 +203,10 @@ ABLATIONS = {
     "cuda_graph": ("graph_on", "graph_off"),
     "overlap": ("overlap_on", "overlap_off"),
     "policy": ("policy_cache", "policy_sjf", "policy_fcfs"),
+    # Speculative decoding: the off arm runs in the same process, so it shares the
+    # (smaller) KV pool and has no decode graphs -- it is the spec path without
+    # speculation, not the plain engine. Compare with a separate run for that.
+    "spec": ("spec_off", "spec_g2", "spec_g4", "spec_g6"),
     "none": ("default",),
 }
 
@@ -222,6 +230,11 @@ def set_arm(eng: Engine, arm: str) -> None:
             raise SystemExit("--ablate cuda_graph needs the decode graphs captured (no --disable-cuda-graph)")
         kv.set_radix(kv.radix)
         eng.runner.use_cuda_graph = arm == "graph_on"
+    elif arm.startswith("spec_"):
+        if not isinstance(eng, SpecEngine):
+            raise SystemExit("--ablate spec needs a draft model (--spec-draft)")
+        kv.set_radix(kv.radix)
+        eng.gamma = 0 if arm == "spec_off" else int(arm.removeprefix("spec_g"))
     elif arm.startswith("chunk_"):
         kv.set_radix(kv.radix)
         eng.scheduler.chunked_prefill_size = 0 if arm == "chunk_off" else int(arm.removeprefix("chunk_"))
@@ -244,7 +257,9 @@ def abba(arms: tuple[str, ...], rounds: int) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_engine_args(ap)
+    add_spec_args(ap)
     g = ap.add_argument_group("benchmark")
+    g.add_argument("--model", default="0.6B", help="target model: a pinned size (0.6B, 1.7B, 8B)")
     g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy"], required=True)
     g.add_argument("--groups", type=int, default=8)
     g.add_argument("--per-group", type=int, default=8)
@@ -276,9 +291,18 @@ def main() -> int:
         print("refusing to measure uncommitted code (tracked files modified)", file=sys.stderr)
         return 2
 
-    path = model_path(QWEN3_0_6B, download=False)
+    path = model_path(spec_for(args.model), download=False)
     model = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(path)), load_weights(path))
-    eng = Engine(model, **engine_kwargs(args))
+    if args.spec_draft:
+        draft = model
+        if args.spec_draft != "same":
+            dpath = model_path(spec_for(args.spec_draft), download=False)
+            draft = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(dpath)), load_weights(dpath))
+        kw = engine_kwargs(args)
+        kw.pop("cuda_graph_max_bs")
+        eng = SpecEngine(model, draft, gamma=args.spec_gamma, cuda_graph_max_bs=args.cuda_graph_max_bs, **kw)
+    else:
+        eng = Engine(model, **engine_kwargs(args))
     arms = ABLATIONS[args.ablate]
     if args.arms:
         unknown = set(args.arms) - set(arms)
@@ -311,6 +335,8 @@ def main() -> int:
         for k, arm in enumerate(abba(arms, args.rounds)):
             set_arm(eng, arm)
             eng.scheduler.stats = dict.fromkeys(eng.scheduler.stats, 0)
+            if isinstance(eng, SpecEngine):
+                eng.spec_stats = dict.fromkeys(eng.spec_stats, 0)
             preempt0 = eng.scheduler.num_preemptions
             t_start = gpu.sample_now()
             torch.cuda.nvtx.range_push(f"run {k} {arm}")
@@ -362,6 +388,11 @@ def main() -> int:
                     # compare backends, and a row that does not say which one it used
                     # cannot be read back.
                     block_backend=eng.runner.block_backend,
+                    target_model=args.model,
+                    draft_model=args.spec_draft or "",
+                    spec_gamma=eng.gamma if isinstance(eng, SpecEngine) else 0,
+                    spec_alpha=round(eng.acceptance, 4) if isinstance(eng, SpecEngine) else "",
+                    spec_tokens_per_round=round(eng.tokens_per_round, 3) if isinstance(eng, SpecEngine) else "",
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
                 )

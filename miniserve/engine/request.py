@@ -118,6 +118,15 @@ class Request:
         """Tokens a prefill of this request runs: the prompt plus any output kept across a preemption."""
         return len(self.prompt_ids) + len(self.output_ids)
 
+    def token_slice(self, start: int, n: int) -> list[int]:
+        """Tokens ``start .. start + n`` of prompt + output, without concatenating the two."""
+        p = len(self.prompt_ids)
+        if start >= p:
+            return self.output_ids[start - p : start - p + n]
+        if start + n <= p:
+            return self.prompt_ids[start : start + n]
+        return self.prompt_ids[start:] + self.output_ids[: start + n - p]
+
     @property
     def ready_ids(self) -> list[int]:
         """Output tokens read back so far (``output_ids`` without trailing placeholders)."""

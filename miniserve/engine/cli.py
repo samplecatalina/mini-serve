@@ -59,6 +59,20 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_spec_args(parser: argparse.ArgumentParser) -> None:
+    """Speculative decoding, for the entry points that can load a second model."""
+    g = parser.add_argument_group("speculative decoding")
+    g.add_argument(
+        "--spec-draft",
+        default=None,
+        metavar="MODEL",
+        help="propose with this model and verify with the target: a pinned size (0.6B, 1.7B, 8B), "
+        "or 'same' to propose with the target itself, which makes every proposal a correct one "
+        "and is how the loop is checked. Needs --disable-radix and --disable-overlap.",
+    )
+    g.add_argument("--spec-gamma", type=int, default=4, help="proposals per round; 0 decodes one token at a time")
+
+
 def engine_kwargs(args: argparse.Namespace) -> dict:
     return dict(
         max_running=args.max_running,

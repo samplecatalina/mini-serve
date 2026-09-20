@@ -22,8 +22,21 @@ class ModelSpec:
 
 
 QWEN3_0_6B = ModelSpec("Qwen/Qwen3-0.6B", "c1899de289a04d12100db370d81485cdf75e47ca")
+QWEN3_1_7B = ModelSpec("Qwen/Qwen3-1.7B", "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e")
+QWEN3_8B = ModelSpec("Qwen/Qwen3-8B", "b968826d9c46dd6066d109eabc6255188de91218")
+
+# The size of a model is how it is named everywhere a command line mentions one.
+MODELS = {"0.6B": QWEN3_0_6B, "1.7B": QWEN3_1_7B, "8B": QWEN3_8B}
 
 _ALLOW_PATTERNS = ["*.json", "*.safetensors", "*.txt"]
+
+
+def spec_for(name: str) -> ModelSpec:
+    """The pinned snapshot of a model named by its size, e.g. ``0.6B``."""
+    try:
+        return MODELS[name]
+    except KeyError:
+        raise ValueError(f"unknown model {name!r}, expected one of {sorted(MODELS)}") from None
 
 
 def model_path(spec: ModelSpec = QWEN3_0_6B, download: bool = False) -> Path:

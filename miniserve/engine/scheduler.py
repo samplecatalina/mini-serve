@@ -110,18 +110,24 @@ class Scheduler:
         kv: KVCacheManager | None = None,
         chunked_prefill_size: int = 0,
         policy: SchedulePolicy | None = None,
+        tokens_per_step: int = 1,
     ):
         """``kv``: the paged KV pool to budget against, with its prefix cache (None: no KV budget).
         ``chunked_prefill_size``: tokens per step, decode rows included, with prefills cut into
         chunks and batched with decodes; 0 keeps whole prefills in prefill-only batches.
         ``policy``: admission order and preemption choice (default FCFS); may be replaced
-        between steps."""
+        between steps. ``tokens_per_step``: tokens a decode step may append to a request
+        (more than one under speculative decoding, which proposes several and keeps a prefix);
+        the block budget is taken for all of them."""
         if max_running < 1 or max_prefill_tokens < 1:
             raise ValueError("max_running and max_prefill_tokens must be positive")
         if chunked_prefill_size < 0:
             raise ValueError(f"chunked_prefill_size must be >= 0, got {chunked_prefill_size}")
         if chunked_prefill_size and kv is None:
             raise ValueError("chunked prefill needs a paged KV pool")
+        if tokens_per_step < 1:
+            raise ValueError(f"tokens_per_step must be >= 1, got {tokens_per_step}")
+        self.tokens_per_step = tokens_per_step
         self.chunked_prefill_size = chunked_prefill_size
         self.max_running = max_running
         self.max_prefill_tokens = max_prefill_tokens
@@ -137,7 +143,10 @@ class Scheduler:
     def add(self, req: Request) -> None:
         if req.state is not RequestState.WAITING:
             raise ValueError(f"request {req.rid} is {req.state.name}, expected WAITING")
-        if self.kv is not None and self._blocks_for(req.max_len) > self.kv.allocator.num_blocks:
+        # A step may append tokens_per_step tokens at once, so the last one can overshoot
+        # max_new_tokens before the surplus is given back.
+        peak = req.max_len + self.tokens_per_step - 1
+        if self.kv is not None and self._blocks_for(peak) > self.kv.allocator.num_blocks:
             raise ValueError(
                 f"request {req.rid} needs up to {req.max_len} tokens of KV, "
                 f"the pool holds {self.kv.allocator.num_blocks * self.kv.block_size}"
@@ -288,7 +297,7 @@ class Scheduler:
         need = 0
         for r in reqs:
             if Scheduler._decodes(r):
-                need += r.cache.blocks_needed(1)
+                need += r.cache.blocks_needed(self.tokens_per_step)
             elif r.state is RequestState.PREFILL:
                 need += self._blocks_for(r.seq_len + 1) - r.cache.num_blocks
         return need
@@ -316,10 +325,9 @@ class Scheduler:
     def _blocks_for(self, num_tokens: int) -> int:
         return -(-num_tokens // self.kv.block_size)
 
-    @staticmethod
-    def _decode_need(reqs: list[Request]) -> int:
+    def _decode_need(self, reqs: list[Request]) -> int:
         """Blocks the next decode step of ``reqs`` would allocate."""
-        return sum(r.cache.blocks_needed(1) for r in reqs if Scheduler._decodes(r))
+        return sum(r.cache.blocks_needed(self.tokens_per_step) for r in reqs if Scheduler._decodes(r))
 
     @staticmethod
     def _decodes(r: Request) -> bool:
