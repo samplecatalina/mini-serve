@@ -1,0 +1,1 @@
+{"idle_gpu": {"t": 462892.281911592, "name": "NVIDIA L40S", "sm_mhz": 210, "mem_mhz": 405, "temp_c": 24, "power_w": 32.78, "power_limit_w": 350.0, "reasons": "0x0000000000000001", "util": 0, "mem_used_mib": 0}, "idle_power_limit_w": [350.0, 350.0, 350.0, 350.0, 350.0, 350.0], "power_max_limit_w": 350.0, "host": null}
