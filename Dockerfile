@@ -9,10 +9,11 @@ ARG CUDA_VERSION=12.8.1
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 # 1. System toolchain. python3.12-dev provides Python.h, which the Triton
-#    launcher needs when it JIT-compiles its C stub.
+#    launcher needs when it JIT-compiles its C stub, and which the C++ core is
+#    built against. cmake builds the C++ core.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.12 python3.12-dev python3.12-venv \
-        build-essential git curl ca-certificates \
+        build-essential cmake git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. uv, same version as used to produce uv.lock.

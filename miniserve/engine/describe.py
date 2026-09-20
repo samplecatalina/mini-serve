@@ -34,6 +34,7 @@ def engine_description(engine: Engine) -> dict:
         kv_pool_tokens=None if alloc is None else alloc.num_blocks * alloc.block_size,
         kv_pool_blocks=None if alloc is None else alloc.num_blocks,
         block_size=None if alloc is None else alloc.block_size,
+        block_backend=runner.block_backend,
         cuda_graph=runner.use_cuda_graph,
         cuda_graph_buckets=None if graphs is None else list(graphs.buckets),
         cuda_graph_bytes=None if graphs is None else graphs.graph_bytes,

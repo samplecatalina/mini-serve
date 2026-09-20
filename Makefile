@@ -37,7 +37,7 @@ NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
 NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
 NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif
+.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif minicore minicore-test minicore-clean
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -46,13 +46,15 @@ help:
 	@echo "shell      interactive shell in the development container"
 	@echo "env-check  verify toolchain, pinned versions, GPU, JIT paths and caches"
 	@echo "weights    download the pinned Qwen3-0.6B snapshot into the cache"
-	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests)"
+	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests; BLOCK_BACKEND=cpp)"
 	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench-roofline   this GPU's copy bandwidth and BF16 GEMM rate: the denominators"
 	@echo "charts     draw the ablation figures from the result rows (CHART_DEVICE=l40s)"
 	@echo "bench-decode-sharing  decode attention with and without shared KV blocks"
 	@echo "ncu-decode-sharing    one layout of it under Nsight Compute (BENCH_ARGS='--case shared --iters 3')"
+	@echo "minicore   build the C++ core as an in-place extension module"
+	@echo "minicore-test    build and run its gtest suite (fetches googletest; CPU only)"
 	@echo "sif        convert an image to an Apptainer image in SIF_DIR (SIF_IMAGE, SIF_NAME) for the cluster"
 	@echo "bench      the main caliber: start the server, run genai-bench against it (BENCH_ARGS=...)"
 	@echo "serve      run the server in the foreground (ENGINE_ARGS=...)"
@@ -76,8 +78,29 @@ env-check:
 weights:
 	$(RUN) python -m miniserve.tools.fetch_weights
 
+# BLOCK_BACKEND=cpp runs the whole suite on the C++ block bookkeeping, not just
+# the allocator tests that are parametrized over both.
 test:
-	$(RUN) python -m pytest $(PYTEST_ARGS)
+	$(RUN) env $(if $(BLOCK_BACKEND),MINISERVE_BLOCK_BACKEND=$(BLOCK_BACKEND),) python -m pytest $(PYTEST_ARGS)
+
+# The C++ core. The extension is built in place, next to the package that imports
+# it, because the repository is used from PYTHONPATH and never installed. The
+# compiler baseline comes from CXXFLAGS in the image (-march=x86-64-v2): a build
+# with -march=native would emit instructions the cluster nodes do not have.
+minicore:
+	$(RUN) sh -c 'cmake -S minicore -B minicore/build -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE=$$(command -v python)'
+	$(RUN) cmake --build minicore/build --parallel
+
+# gtest is fetched on demand, so the module above stays buildable without network
+# access. Pure CPU: it needs no GPU and no GPU queue.
+minicore-test:
+	$(RUN) cmake -S minicore -B minicore/build-tests -DCMAKE_BUILD_TYPE=Release \
+		-DMINICORE_BUILD_TESTS=ON -DMINICORE_BUILD_MODULE=OFF
+	$(RUN) cmake --build minicore/build-tests --parallel
+	$(RUN) ./minicore/build-tests/minicore_tests
+
+minicore-clean:
+	rm -rf minicore/build minicore/build-tests miniserve/cache/_minicore*.so
 
 bench-offline:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace \

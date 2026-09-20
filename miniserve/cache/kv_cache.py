@@ -27,7 +27,6 @@ accounting: empty prefixes, nothing inserted.
 from __future__ import annotations
 
 from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
-from miniserve.cache.block_table import BlockTable
 from miniserve.cache.radix_tree import RadixTree
 
 
@@ -60,7 +59,7 @@ class KVCacheManager:
         if self.tree is not None:
             node, blocks = self.tree.match(self._tokens(req)[: req.seq_len - 1])
             self.tree.lock(node)
-        req.cache = BlockTable(self.allocator, blocks)
+        req.cache = self.allocator.new_table(blocks)
         req.cache_node = node
         req.num_cached_tokens = len(blocks) * self.block_size
         return req.num_cached_tokens

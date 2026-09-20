@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 *.egg-info/
 build/
+# C++ core build trees and the in-place extension
+minicore/build*/
+miniserve/cache/_minicore*.so
 # Nsight Systems exports (regenerated from .nsys-rep)
 *.sqlite
 .preflight.json

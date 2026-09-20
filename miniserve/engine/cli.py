@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from miniserve.cache.backend import BACKENDS as BLOCK_BACKENDS
 from miniserve.engine.model_runner import ATTENTION_MODES
 from miniserve.engine.policy import POLICIES
 
@@ -49,6 +50,13 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="largest decode batch captured in a CUDA Graph (default: --max-running); "
         "graphs are captured for powers of two below it and for it",
     )
+    g.add_argument(
+        "--block-backend",
+        choices=BLOCK_BACKENDS,
+        default=None,
+        help="implementation of the KV block bookkeeping: python (default) or cpp "
+        "(requires the built extension); also settable with MINISERVE_BLOCK_BACKEND",
+    )
 
 
 def engine_kwargs(args: argparse.Namespace) -> dict:
@@ -64,4 +72,5 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         overlap=not args.disable_overlap,
         schedule_policy=args.schedule_policy,
         cuda_graph_max_bs=args.cuda_graph_max_bs,
+        block_backend=args.block_backend,
     )

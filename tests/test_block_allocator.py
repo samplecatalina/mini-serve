@@ -1,7 +1,13 @@
 """BlockAllocator / BlockTable: allocation, release, reference counting, fragmentation.
 
 Parametrized over allocator backends so that every implementation runs the
-same tests, including the exact order in which block ids are handed out.
+same tests, including the exact order in which block ids are handed out. The
+Python implementation in ``miniserve/cache`` is the specification; the C++ one
+built from ``minicore/`` has to agree with it block id for block id and error
+for error. That is the whole point of running one suite over both.
+
+Tables are created with ``allocator.new_table(...)`` rather than by naming a
+table class, so a table always belongs to the same backend as its allocator.
 """
 
 from __future__ import annotations
@@ -10,15 +16,15 @@ import random
 
 import pytest
 
-from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
-from miniserve.cache.block_table import BlockTable
-
-BACKENDS = {"python": BlockAllocator}
+from miniserve.cache.backend import BACKENDS, OutOfBlocks, allocator_class
 
 
-@pytest.fixture(params=list(BACKENDS))
+@pytest.fixture(params=BACKENDS)
 def make(request):
-    return BACKENDS[request.param]
+    try:
+        return allocator_class(request.param)
+    except ImportError as exc:
+        pytest.skip(str(exc))
 
 
 def _snapshot(a):
@@ -139,7 +145,7 @@ def test_no_external_fragmentation(make):
 
 def test_table_append_and_slots(make):
     a = make(8, 4)
-    t = BlockTable(a)
+    t = a.new_table()
     assert (t.num_tokens, t.capacity, t.last_block_len, t.blocks) == (0, 0, 0, [])
     assert t.append_tokens(5) == [0, 1]  # 5 tokens -> 2 blocks of 4
     assert (t.num_tokens, t.capacity, t.last_block_len) == (5, 8, 1)
@@ -156,14 +162,14 @@ def test_table_slots_follow_physical_blocks(make):
     a = make(8, 4)
     a.allocate(3)  # blocks 0..2 held elsewhere
     a.free([1])
-    t = BlockTable(a)
+    t = a.new_table()
     t.append_tokens(6)
     assert t.blocks == [1, 3]
     assert [t.slot(p) for p in range(6)] == [4, 5, 6, 7, 12, 13]
 
 
 def test_blocks_needed(make):
-    t = BlockTable(make(8, 16))
+    t = make(8, 16).new_table()
     assert [t.blocks_needed(n) for n in (0, 1, 16, 17, 32, 33)] == [0, 1, 1, 2, 2, 3]
     t.append_tokens(10)
     assert [t.blocks_needed(n) for n in (0, 6, 7, 22, 23)] == [0, 0, 1, 1, 2]
@@ -173,7 +179,7 @@ def test_blocks_needed(make):
 
 def test_table_append_all_or_nothing(make):
     a = make(2, 4)
-    t = BlockTable(a)
+    t = a.new_table()
     t.append_tokens(3)
     before = (_snapshot(a), list(t.blocks), t.num_tokens)
     with pytest.raises(OutOfBlocks):
@@ -184,7 +190,7 @@ def test_table_append_all_or_nothing(make):
 def test_internal_fragmentation_bound(make):
     a = make(64, 16)
     for n in range(1, 200, 7):
-        t = BlockTable(a)
+        t = a.new_table()
         t.append_tokens(n)
         assert 0 <= t.capacity - t.num_tokens < a.block_size
         t.release()
@@ -193,7 +199,7 @@ def test_internal_fragmentation_bound(make):
 
 def test_release(make):
     a = make(8, 4)
-    t = BlockTable(a)
+    t = a.new_table()
     t.append_tokens(9)
     t.release()
     assert (t.blocks, t.num_tokens, a.num_free) == ([], 0, 8)
@@ -203,9 +209,9 @@ def test_release(make):
 
 def test_shared_prefix(make):
     a = make(8, 4)
-    owner = BlockTable(a)
+    owner = a.new_table()
     owner.append_tokens(8)  # blocks [0, 1], both full
-    t = BlockTable(a, prefix_blocks=owner.blocks)
+    t = a.new_table(owner.blocks)
     assert (t.num_tokens, t.last_block_len) == (8, 4)
     assert [a.refcount(b) for b in owner.blocks] == [2, 2]
     assert t.append_tokens(1) == [2]  # new token goes into a fresh private block
@@ -220,9 +226,9 @@ def test_shared_prefix_validation(make):
     a = make(8, 4)
     [b] = a.allocate(1)
     with pytest.raises(ValueError):
-        BlockTable(a, prefix_blocks=[3])  # free block
+        a.new_table([3])  # free block
     with pytest.raises(ValueError):
-        BlockTable(a, prefix_blocks=[b, b])
+        a.new_table([b, b])
     assert a.refcount(b) == 1
 
 
@@ -234,11 +240,11 @@ def test_random_operations(make, seed):
     """Random table appends, shares and releases, checked against a plain holder count."""
     rng = random.Random(seed)
     a = make(32, 4)
-    tables: list[BlockTable] = []
+    tables = []
     for _ in range(2000):
         op = rng.random()
         if op < 0.45 or not tables:
-            t = tables[rng.randrange(len(tables))] if tables and rng.random() < 0.7 else BlockTable(a)
+            t = tables[rng.randrange(len(tables))] if tables and rng.random() < 0.7 else a.new_table()
             if t not in tables:
                 tables.append(t)
             n = rng.randint(1, 12)
@@ -250,7 +256,7 @@ def test_random_operations(make, seed):
         elif op < 0.6:
             src = tables[rng.randrange(len(tables))]
             full = src.num_tokens // a.block_size
-            tables.append(BlockTable(a, prefix_blocks=src.blocks[: rng.randint(0, full)]))
+            tables.append(a.new_table(src.blocks[: rng.randint(0, full)]))
         else:
             tables.pop(rng.randrange(len(tables))).release()
 

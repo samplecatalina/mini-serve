@@ -54,6 +54,7 @@ class Engine:
         cuda_graph_max_bs: int | None = None,
         overlap: bool = True,
         schedule_policy: str = "fcfs",
+        block_backend: str | None = None,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
@@ -63,6 +64,7 @@ class Engine:
         requests (default ``max_running``; paged attention only).
         ``overlap``: launch each step before reading back the previous one.
         ``schedule_policy``: admission order and preemption choice (``policy.py``).
+        ``block_backend``: implementation of the KV block bookkeeping (``python`` or ``cpp``).
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -75,6 +77,7 @@ class Engine:
                 radix=radix,
                 cuda_graph=cuda_graph,
                 cuda_graph_max_bs=cuda_graph_max_bs,
+                block_backend=block_backend,
             )
         self.runner = runner
         if chunked_prefill_size is None:

@@ -19,8 +19,7 @@ import gc
 
 import torch
 
-from miniserve.cache.block_allocator import BlockAllocator
-from miniserve.cache.block_table import BlockTable
+from miniserve.cache.backend import allocator_class, default_backend
 from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
@@ -57,6 +56,7 @@ class ModelRunner:
         radix: bool = True,
         cuda_graph: bool = True,
         cuda_graph_max_bs: int | None = None,
+        block_backend: str | None = None,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
@@ -65,14 +65,17 @@ class ModelRunner:
         ``radix``: keep a prefix cache over the pool (paged mode only).
         ``cuda_graph``: capture decode graphs for batch sizes up to ``cuda_graph_max_bs``
         (default ``max_running``) after the pool is allocated (paged mode only); they use the
-        memory the pool leaves free. ``use_cuda_graph`` switches them off and on at run time."""
+        memory the pool leaves free. ``use_cuda_graph`` switches them off and on at run time.
+        ``block_backend``: implementation of the block bookkeeping (``python`` or ``cpp``);
+        default from ``MINISERVE_BLOCK_BACKEND``."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
         self.device = model.device
         self.attention = attention
+        self.block_backend = block_backend if block_backend is not None else default_backend()
         self.sampler = Sampler(model.device, model.cfg.vocab_size)
-        self.allocator: BlockAllocator | None = None
+        self.allocator = None
         self.kv: KVCacheManager | None = None
         self.graphs: DecodeGraphs | None = None
         self.use_cuda_graph = False
@@ -97,7 +100,7 @@ class ModelRunner:
                     )
                 num_blocks = kv_pool_tokens // block_size
             self.kv_profile["num_blocks"] = num_blocks
-            self.allocator = BlockAllocator(num_blocks, block_size)
+            self.allocator = allocator_class(self.block_backend)(num_blocks, block_size)
             self.kv = KVCacheManager(self.allocator, radix)
             # One block past the allocator's: padding rows of a decode graph write and read it.
             self.pool = pool(num_blocks + 1)
@@ -131,8 +134,8 @@ class ModelRunner:
         cfg = self.model.cfg
         probe = make_pool(-(-num_tokens // block_size))
         self.flashinfer = FlashInferPagedAttention(probe, cfg.num_heads, self.model.attn_scale)
-        alloc = BlockAllocator(probe.num_blocks, block_size)
-        table = BlockTable(alloc)
+        alloc = allocator_class(self.block_backend)(probe.num_blocks, block_size)
+        table = alloc.new_table()
         table.append_tokens(num_tokens)
         torch.cuda.synchronize(self.device)
         base = torch.cuda.memory_allocated(self.device)
@@ -212,7 +215,9 @@ class ModelRunner:
             if any(t.num_tokens != s for t, s in zip(caches, batch.starts)):
                 raise RuntimeError("batch starts disagree with the block tables")
             self._reserve(caches, seq_lens)
-            slots = [t.slot(p) for t, n in zip(caches, seq_lens) for p in range(t.num_tokens - n, t.num_tokens)]
+            # One call per request, not one per token: with a C++ table every
+            # crossing of the binding costs more than the lookup it performs.
+            slots = [s for t, n in zip(caches, seq_lens) for s in t.tail_slots(n)]
             if not prefill and self.use_cuda_graph and len(caches) <= self.graphs.max_batch:
                 return self.graphs.run(ids, pos, slots, caches, fill_idx)
             self.flashinfer.plan(prefill, seq_lens, caches, slots)
@@ -242,7 +247,7 @@ class ModelRunner:
         src = [rows[batch.requests[i].rid] for i in dst]
         return to_device(dst, torch.long, self.device), tokens.index_select(0, to_device(src, torch.long, tokens.device))
 
-    def _reserve(self, tables: list[BlockTable], seq_lens: list[int]) -> None:
+    def _reserve(self, tables: list, seq_lens: list[int]) -> None:
         """Extend every table by its new tokens. If the pool is short even after evicting
         from the prefix cache, raise ``OutOfBlocks`` with the tables unchanged."""
         need = sum(t.blocks_needed(n) for t, n in zip(tables, seq_lens))

@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx"]
+dev = ["pytest>=8", "httpx", "pybind11>=2.13"]
 
 [tool.uv]
 package = false

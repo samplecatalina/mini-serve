@@ -53,10 +53,24 @@ class BlockTable:
         self.num_tokens += n
         return new
 
+    @property
+    def num_blocks(self) -> int:
+        """Blocks the table holds. Cheaper than ``len(table.blocks)``, which a
+        C++ backend would have to build a list for."""
+        return len(self.blocks)
+
     def slot(self, pos: int) -> int:
         if not 0 <= pos < self.num_tokens:
             raise IndexError(f"position {pos} out of range [0, {self.num_tokens})")
         return self.blocks[pos // self.block_size] * self.block_size + pos % self.block_size
+
+    def tail_slots(self, n: int) -> list[int]:
+        """Slots of the last ``n`` tokens, in order: one call per request per step
+        instead of one per token."""
+        if not 0 <= n <= self.num_tokens:
+            raise IndexError(f"tail of {n} tokens out of range [0, {self.num_tokens}]")
+        bs = self.block_size
+        return [self.blocks[p // bs] * bs + p % bs for p in range(self.num_tokens - n, self.num_tokens)]
 
     def release(self) -> None:
         """Give every block back (dropping this table's reference) and empty the table."""

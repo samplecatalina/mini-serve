@@ -18,6 +18,9 @@ class OutOfBlocks(RuntimeError):
     pass
 
 
+BACKEND = "python"
+
+
 class BlockAllocator:
     def __init__(self, num_blocks: int, block_size: int):
         if num_blocks < 1 or block_size < 1:
@@ -81,6 +84,16 @@ class BlockAllocator:
             self._ref[b] -= 1
             if self._ref[b] == 0:
                 self._free.append(b)
+
+    def new_table(self, prefix_blocks: Iterable[int] = ()) -> "BlockTable":
+        """A block table over this allocator, optionally starting with a shared prefix.
+
+        Callers use this instead of naming a table class, so that a table always
+        matches the backend of the allocator it is built on.
+        """
+        from miniserve.cache.block_table import BlockTable
+
+        return BlockTable(self, list(prefix_blocks))
 
     def check_invariants(self) -> None:
         """Free stack and reference counts describe the same set; raises AssertionError otherwise."""

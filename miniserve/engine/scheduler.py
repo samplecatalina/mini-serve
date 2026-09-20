@@ -174,7 +174,7 @@ class Scheduler:
             if fits and kv is not None:
                 # The rest of the prefill + the next decode token. Acquiring locked the
                 # cached prefix, so kv.num_available no longer counts it as evictable.
-                need = self._blocks_for(req.seq_len + 1) - len(req.cache.blocks)
+                need = self._blocks_for(req.seq_len + 1) - req.cache.num_blocks
                 fits = need <= kv.num_available - self._decode_need(self.running) - reserved
             if not fits:
                 if kv is not None:
@@ -244,7 +244,7 @@ class Scheduler:
             if req.num_pending:  # its last token is not read back yet; its prefill needs it
                 break
             cached = kv.acquire(req)
-            need = self._blocks_for(req.seq_len + 1) - len(req.cache.blocks)
+            need = self._blocks_for(req.seq_len + 1) - req.cache.num_blocks
             if need > kv.num_available - self._outstanding(self.running):
                 kv.abandon(req)
                 break
@@ -290,7 +290,7 @@ class Scheduler:
             if Scheduler._decodes(r):
                 need += r.cache.blocks_needed(1)
             elif r.state is RequestState.PREFILL:
-                need += self._blocks_for(r.seq_len + 1) - len(r.cache.blocks)
+                need += self._blocks_for(r.seq_len + 1) - r.cache.num_blocks
         return need
 
     # ------------------------------------------------------------------ preemption
