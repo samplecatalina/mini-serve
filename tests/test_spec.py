@@ -295,6 +295,24 @@ def _load(size: str):
     return Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(path)), load_weights(path))
 
 
+def _need_free_memory(gib: float) -> None:
+    """Skip unless the device can still hold what follows.
+
+    The anchor below holds two models at once, which is several times what any other test
+    needs. Run after the rest of the suite, the device is full of what earlier modules
+    allocated, and no amount of collecting inside this process gives it back."""
+    import gc
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    free = torch.cuda.mem_get_info()[0] / 1024**3
+    if free < gib:
+        pytest.skip(
+            f"needs {gib:.1f} GiB of free device memory, {free:.1f} GiB left; "
+            f"run this file on its own: make test PYTEST_ARGS='tests/test_spec.py'"
+        )
+
+
 @pytest.fixture(scope="module")
 def qwen3(qwen3_path):
     from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
@@ -359,6 +377,7 @@ def test_speculation_matches_the_reference(tokenizer, qwen3, alone):
     """
     from prompts import PROMPTS, encode
 
+    _need_free_memory(5.0)  # the 1.7B target next to the 0.6B draft this module already holds
     target, draft = _load("1.7B"), qwen3  # a draft three times smaller: it is wrong often enough
     ids = {k: encode(tokenizer, PROMPTS[k][0]) for k in ANCHOR_PROMPTS}
     refs = {k: _reference(target, ids[k]) for k in ANCHOR_PROMPTS}
