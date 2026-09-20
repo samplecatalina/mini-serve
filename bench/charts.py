@@ -38,6 +38,9 @@ GRID = "#dcdcd8"
 # light mode, against this surface. Aqua sits below 3:1 on it, so every mark that
 # uses these carries a visible label rather than relying on the fill alone.
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a")
+# A second encoding beside colour: lines that coincide stay tellable apart, and
+# the pair that is hardest under colour-vision deficiency is separated by shape.
+MARKERS = ("o", "s", "^")
 
 
 def read(device: str, name: str) -> list[dict]:
@@ -218,43 +221,54 @@ def host_cost_figure(device: str, bw: float):
 
 
 def policy_figure(device: str):
-    """Throughput and the wait, against pool size, one line per policy."""
-    rows = read(device, "m4_2_policy_small.csv") + read(device, "m4_2_policy_large.csv")
-    if not rows:
+    """Throughput against pool size, one line per policy, one panel per workload.
+
+    The two workloads are not on one axis: they differ in how many requests they
+    offer, so a point from one says nothing about a point from the other. What is
+    comparable is the shape of each panel.
+    """
+    panels = [(n, t) for n, t in
+              (("m4_2_policy_small.csv", "64 requests"), ("m4_2_policy_large.csv", "512 requests"))
+              if read(device, n)]
+    if not panels:
         return None
-    pools = sorted({int(r["kv_pool_tokens"]) for r in rows})
-    arms = [a for a in ("policy_fcfs", "policy_sjf", "policy_cache")
-            if any(r["arm"] == a for r in rows)]
     names = {"policy_fcfs": "first come, first served", "policy_sjf": "shortest job first",
              "policy_cache": "longest cached prefix first"}
 
-    def at(arm, pool, key):
-        vals = [float(r[key]) for r in rows if r["arm"] == arm and int(r["kv_pool_tokens"]) == pool]
-        return sum(vals) / len(vals) if vals else None
-
-    fig, (ax1, ax2) = figure(
+    fig, axes = figure(
         "Scheduling policy against KV pool size",
-        "Requests in groups that share a prompt prefix. A bigger pool means less queueing, and less "
-        "for a policy to decide;\nthe measurement asks where the policies stop differing.",
+        "Requests in groups sharing a 512-token prompt prefix - the thing a cache-aware policy exists "
+        "to exploit.\nEvery point is the median of three runs. First-come and shortest-job coincide "
+        "wherever the pool is not the binding constraint.",
+        panels=len(panels),
     )
-    for i, arm in enumerate(arms):
-        xs = [p for p in pools if at(arm, p, "output_tok_s") is not None]
-        ys = [at(arm, p, "output_tok_s") for p in xs]
-        ax1.plot(xs, ys, color=SERIES[i], linewidth=2, marker="o", markersize=8,
-                 markeredgecolor=SURFACE, markeredgewidth=2, label=names[arm])
-        ax1.annotate(names[arm], (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0),
-                     fontsize=8.5, color=INK_2, va="center")
-        y2 = [at(arm, p, "itl_p99_ms") for p in xs]
-        if all(v is not None for v in y2):
-            ax2.plot(xs, y2, color=SERIES[i], linewidth=2, marker="o", markersize=8,
-                     markeredgecolor=SURFACE, markeredgewidth=2, label=names[arm])
-    for ax, title, ylabel in ((ax1, "Output throughput", "tokens/s"),
-                              (ax2, "Time between tokens, 99th percentile", "ms")):
-        style(ax, title, ylabel)
+    for ax, (name, workload) in zip(axes, panels):
+        rows = read(device, name)
+        pools = sorted({int(r["kv_pool_tokens"]) for r in rows})
+        for i, arm in enumerate(("policy_fcfs", "policy_sjf", "policy_cache")):
+            xs, ys = [], []
+            for pool in pools:
+                vals = sorted(float(r["output_tok_s"]) for r in rows
+                              if r["arm"] == arm and int(r["kv_pool_tokens"]) == pool)
+                if vals:
+                    xs.append(pool)
+                    ys.append(vals[len(vals) // 2])
+            if not xs:
+                continue
+            ax.plot(xs, ys, color=SERIES[i], linewidth=2, marker=MARKERS[i], markersize=9,
+                    markeredgecolor=SURFACE, markeredgewidth=2, label=names[arm])
+            # Staggered, because two policies that land on the same number would
+            # otherwise print their labels on top of each other.
+            ax.annotate(f"{ys[-1]:.0f}", (xs[-1], ys[-1]), textcoords="offset points",
+                        xytext=(9, [-11, 1, 6][i]), fontsize=8.5, color=INK_2)
+        style(ax, workload, "output tokens/s")
         ax.set_xscale("log")
         ax.set_xlabel("KV pool (tokens)", color=INK_2, fontsize=9)
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v/1000:g}k"))
-    ax1.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
+        ax.set_xticks(pools)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{round(v / 1000):g}k"))
+        ax.xaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
+        ax.set_ylim(0, None)
+    axes[0].legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
     return fig
 
 
