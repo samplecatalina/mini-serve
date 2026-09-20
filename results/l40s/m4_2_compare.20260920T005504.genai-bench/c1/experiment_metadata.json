@@ -1,0 +1,36 @@
+{
+    "cmd": "/usr/local/bin/genai-bench --num-concurrency 1 --batch-size 1 --api-backend openai --api-base http://127.0.0.1:30000 --api-key none --task text-to-text --api-model-name Qwen/Qwen3-0.6B --model-tokenizer /cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca --max-time-per-run 2 --max-requests-per-run 4096 --warmup-ratio 0.25 --metrics-time-unit ms --experiment-base-dir /out --experiment-folder-name m4_2_compare.20260920T005504.genai-bench/c1 --log-dir /out/m4_2_compare.20260920T005504.genai-bench/c1 --additional-request-params {'temperature': 0, 'ignore_eos': True} --traffic-scenario D(1024,256) --server-engine SGLang --gcp-location us-central1 --azure-api-version 2024-02-01 --profile DEFAULT --config-file ~/.oci/config --auth user_principal --model c1899de289a04d12100db370d81485cdf75e47ca --iteration-type num_concurrency --master-port 5557 --storage-provider oci",
+    "benchmark_version": "0.0.5",
+    "api_backend": "openai",
+    "auth_config": {
+        "auth_type": "api_key",
+        "has_api_key": true
+    },
+    "api_model_name": "Qwen/Qwen3-0.6B",
+    "server_model_tokenizer": "/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+    "model": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "task": "text-to-text",
+    "num_concurrency": [
+        1
+    ],
+    "batch_size": [
+        1
+    ],
+    "iteration_type": "num_concurrency",
+    "traffic_scenario": [
+        "D(1024,256)"
+    ],
+    "additional_request_params": {
+        "temperature": 0,
+        "ignore_eos": true
+    },
+    "server_engine": "SGLang",
+    "server_version": null,
+    "server_gpu_type": null,
+    "server_gpu_count": null,
+    "max_time_per_run_s": 120,
+    "max_requests_per_run": 4096,
+    "experiment_folder_name": "/out/m4_2_compare.20260920T005504.genai-bench/c1",
+    "metrics_time_unit": "ms",
+    "dataset_path": "None"
+}

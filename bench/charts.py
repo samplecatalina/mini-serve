@@ -272,6 +272,67 @@ def policy_figure(device: str):
     return fig
 
 
+def compare_figure(device: str, bw: float):
+    """Us against the reference engine: what each delivers, and where each spends a step."""
+    import statistics
+    rows = read(device, "m4_2_compare.csv")
+    if not rows:
+        return None
+    concs = sorted({int(r["concurrency"]) for r in rows})
+    arms = ("miniserve", "sglang")
+    names = {"miniserve": "this engine", "sglang": "reference engine"}
+
+    def med(arm, conc, key):
+        vals = [float(r[key]) for r in rows
+                if r["arm"] == arm and int(r["concurrency"]) == conc and r[key] != ""]
+        return statistics.median(vals) if vals else None
+
+    labels = [f"{c} in flight" for c in concs]
+    fig, (ax1, ax2, ax3) = figure(
+        "Against the reference engine, same machine, same load generator",
+        "Every setting either side reports is pinned to the same value except paging granularity, which "
+        "cannot be.\nAlternating A B B A A B over an hour; each point is the median of three runs. "
+        "Zero failed requests on either side.",
+        panels=3,
+    )
+
+    bars(ax1, labels, {names[a]: [med(a, c, "output_tok_s") for c in concs] for a in arms})
+    style(ax1, "Output throughput", "tokens/s")
+    for i, c in enumerate(concs):
+        r = med("miniserve", c, "output_tok_s") / med("sglang", c, "output_tok_s")
+        ax1.annotate(f"{100 * r:.0f}%", (i, 0), textcoords="offset points", xytext=(0, -26),
+                     ha="center", fontsize=9.5, color=INK, annotation_clip=False)
+    ax1.annotate("ours as a share of theirs", (0, 0), textcoords="offset points", xytext=(0, -42),
+                 ha="left", fontsize=8.5, color=INK_2, annotation_clip=False)
+    ax1.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
+
+    # Dots, not bars: this panel spans 2.5 ms to 61 ms, so it has to be a log
+    # axis, and a bar's length on a log axis means nothing.
+    dumbbell(ax2, labels, {names[a]: [med(a, c, "tpot_p50_ms") for c in concs] for a in arms}, fmt="{:.1f}")
+    style(ax2, "Time between tokens", "ms")
+    ax2.set_yscale("log")
+    ax2.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax2.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
+    for i, c in enumerate(concs):
+        # The batch is the one this engine reports; the other does not report one,
+        # and the same line is drawn for it because both ran the same concurrency
+        # and finished the same number of requests.
+        f = floor_ms(med("miniserve", c, "running_batch_mean"), 1013 + 128, bw)
+        ax2.plot([i - 0.28, i + 0.28], [f, f], color=INK_2, linewidth=1.8, linestyle=(0, (4, 3)),
+                 zorder=5, label="memory-traffic floor" if i == 0 else None)
+        ax2.annotate(f"floor {f:.1f}", (i + 0.28, f), textcoords="offset points", xytext=(3, -3),
+                     fontsize=8, color=INK_2)
+    ax2.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
+
+    dumbbell(ax3, labels, {names[a]: [med(a, c, "ttft_p50_ms") for c in concs] for a in arms})
+    style(ax3, "Time to first token", "ms")
+    ax3.set_yscale("log")
+    ax3.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax3.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
+    ax3.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
+    return fig
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--device", default="l40s")
@@ -307,6 +368,10 @@ def main() -> int:
     f = host_cost_figure(args.device, bw)
     if f:
         made.append(save(f, args.device, "m4_2_host_cost"))
+
+    f = compare_figure(args.device, bw)
+    if f:
+        made.append(save(f, args.device, "m4_2_compare"))
 
     if not made:
         raise SystemExit(f"no result rows under results/{args.device}: nothing to draw")
