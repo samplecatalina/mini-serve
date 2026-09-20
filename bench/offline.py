@@ -357,6 +357,11 @@ def main() -> int:
                     cuda_graph=eng.runner.use_cuda_graph,
                     overlap=eng.overlap,
                     schedule_policy=eng.scheduler.policy.name,
+                    # Fixed for the process, not switchable between arms, so it has to
+                    # travel with every row: two runs of this script are the only way to
+                    # compare backends, and a row that does not say which one it used
+                    # cannot be read back.
+                    block_backend=eng.runner.block_backend,
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
                 )
