@@ -28,8 +28,14 @@ Three things this path gives up, all of them deliberate:
   ``spec/draft.py``.
 - **the target's decode graphs**. A verify pass is an extend pass, so the
   captured decode graphs would never run; they are not captured at all, and
-  their memory goes to the KV pool instead. The draft does capture its own,
-  for the ``gamma - 1`` single-token steps of a round.
+  their memory goes to the KV pool instead.
+
+What a round does capture: the verify pass, as a graph of width ``gamma + 1``
+per batch-size bucket (captured when ``gamma`` is set, so never while a run
+is being measured), and every draft step (``spec/draft.py``). Without them an
+eager pass of a small model is bound by the host issuing its kernels, not by
+the device reading its weights. ``round_graphs`` switches all of them off,
+which is the eager arm of the ablation.
 
 A batch that is not a plain decode batch (a prefill, or a mixed batch under
 chunked prefill) runs through the ordinary loop, one token per decoding
@@ -43,12 +49,13 @@ from collections.abc import Sequence
 
 import torch
 
+from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
-from miniserve.spec.draft import DraftRunner
+from miniserve.spec.draft import FIRST_WIDTH, DraftRunner
 from miniserve.spec.verify import accept_prefix
 
 # Of the free memory, the share the two KV pools may take. Lower than the plain
@@ -99,8 +106,9 @@ class SpecEngine(Engine):
         """``draft_model``: the proposing model, same tokenizer, same dtype (it may be the
         target itself, which makes every proposal a correct one and is how the loop is tested).
         ``gamma``: proposals per round; 0 runs plain decode steps through the same object,
-        which is the off arm of the ablation. ``cuda_graph``: capture the draft's decode
-        graphs (the target's are never captured here). Every other argument means what it
+        which is the off arm of the ablation. ``cuda_graph``: capture the graphs of a round
+        (the draft's steps and the target's verify pass; the target's decode graphs are
+        never captured here). Every other argument means what it
         means for ``Engine``, except that ``radix`` and ``overlap`` must be off."""
         check_options(attention, radix, overlap, gamma)
         if model.dtype is not draft_model.dtype:
@@ -149,6 +157,10 @@ class SpecEngine(Engine):
             block_backend=block_backend,
             workspace=runner.flashinfer.workspace,
         )
+        self._cuda_graph = cuda_graph
+        self._graph_max_bs = cuda_graph_max_bs or max_running
+        self._verify_graphs: dict[int, DecodeGraphs] = {}
+        self._round_graphs = cuda_graph
         self._gamma = 0
         self.gamma = gamma
         self._fill_idx: dict[tuple[int, int], torch.Tensor] = {}
@@ -169,6 +181,33 @@ class SpecEngine(Engine):
         # A round appends up to gamma + 1 tokens to a request, and the scheduler has to
         # hold blocks for all of them before it starts.
         self.scheduler.tokens_per_step = value + 1
+        runner = self.runner
+        if self._cuda_graph and 0 < value < runner.pool.block_size and value not in self._verify_graphs:
+            cfg = runner.model.cfg
+            self._verify_graphs[value] = DecodeGraphs(
+                runner.model,
+                runner.pool,
+                dummy_block=runner.allocator.num_blocks,
+                buckets=graph_buckets(self._graph_max_bs),
+                workspace=runner.flashinfer.workspace,
+                num_heads=cfg.num_heads,
+                scale=runner.model.attn_scale,
+                fence=runner.fence,
+                width=value + 1,
+            )
+
+    @property
+    def round_graphs(self) -> bool:
+        """Whether a round replays captured graphs (verify pass, draft's first step); settable
+        between steps. The draft's single-token steps keep their decode graphs either way."""
+        return self._round_graphs
+
+    @round_graphs.setter
+    def round_graphs(self, value: bool) -> None:
+        if value and not self._cuda_graph:
+            raise ValueError("round graphs were not captured (cuda_graph=False)")
+        self._round_graphs = value
+        self.draft.use_first_graphs = value
 
     @property
     def acceptance(self) -> float:
@@ -217,11 +256,13 @@ class SpecEngine(Engine):
         reaches the decode phase, and again at the start of a round, which is where requests
         that got there while gamma was 0 are picked up. With gamma 0 the draft therefore
         does no work at all, which is what makes that arm of the ablation meaningful."""
+        todo = []
         for r in reqs:
             if r.rid not in self.draft.tables:
                 self.draft.admit(r.rid)
-            if self.draft.covered(r.rid) == 0:
-                self.draft.prefill(r.rid, r.token_slice(0, r.seq_len - 1))
+            if self.draft.covered(r.rid) == 0 and r.seq_len > 1:
+                todo.append((r.rid, r.token_slice(0, r.seq_len - 1)))
+        self.draft.prefill(todo)
 
     def _round(self, batch: Batch) -> None:
         # The NVTX ranges below let a profiler split a round into its parts (host and device).
@@ -237,7 +278,7 @@ class SpecEngine(Engine):
         # 1. propose. The draft is fed whatever the target has and it has not: normally the
         # last sampled token, two tokens after a round every proposal of which was accepted,
         # more after steps that ran without speculation.
-        starts = [self.draft.covered(r.rid) for r in reqs]
+        starts = self._first_step_starts(reqs)
         pending = [r.token_slice(s, r.seq_len - s) for r, s in zip(reqs, starts)]
         with nvtx.range("propose"):
             proposals = self.draft.propose([r.rid for r in reqs], pending, starts, g)
@@ -252,9 +293,14 @@ class SpecEngine(Engine):
             for r in reqs:
                 ids += [r.output_ids[-1], *([0] * g)]
                 pos += range(r.seq_len - 1, r.seq_len - 1 + width)
-            logits = self.runner.forward_tokens(
-                tables, ids, pos, [width] * b, fill=(self._proposal_rows(b, g), proposals.reshape(-1))
-            )
+            fill = (self._proposal_rows(b, g), proposals.reshape(-1))
+            graphs = self._verify_graphs.get(g) if self._round_graphs else None
+            if graphs is not None and b <= graphs.max_batch:
+                slots = [s for t in tables for s in t.tail_slots(width)]
+                self.runner.fence.wait()  # the staging buffer may still feed the last copy
+                logits = graphs.run(ids, pos, slots, tables, fill=fill)
+            else:
+                logits = self.runner.forward_tokens(tables, ids, pos, [width] * b, fill=fill)
             chosen = logits.argmax(dim=-1).view(b, width)
 
         # 3. read both back in one copy and settle each request on the host.
@@ -264,6 +310,21 @@ class SpecEngine(Engine):
             self.spec_stats["rounds"] += 1
             for r, row in zip(reqs, verdict):
                 self._settle(r, row[:g], row[g:])
+
+    def _first_step_starts(self, reqs: Sequence[Request]) -> list[int]:
+        """Where the draft's feed starts for each request: at what it covers, or, when the first
+        step can replay its graph, two tokens before the end for every request. Those missing a
+        single token then give back the KV of the one before it, and recompute it."""
+        starts = [self.draft.covered(r.rid) for r in reqs]
+        g = self.draft.first_graphs
+        if not self._round_graphs or g is None or len(reqs) > g.max_batch:
+            return starts
+        if not all(FIRST_WIDTH <= r.seq_len and r.seq_len - FIRST_WIDTH <= s for r, s in zip(reqs, starts)):
+            return starts  # someone misses more (steps ran without speculation): eager
+        starts = [r.seq_len - FIRST_WIDTH for r in reqs]
+        for r, s in zip(reqs, starts):
+            self.draft.rewind_to(r.rid, s)
+        return starts
 
     def _settle(self, req: Request, proposals: list[int], chosen: list[int]) -> None:
         """Append what this round produced for one request, and give back the rest of its KV."""

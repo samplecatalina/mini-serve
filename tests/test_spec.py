@@ -17,7 +17,7 @@ from miniserve.cache.block_allocator import BlockAllocator
 from miniserve.cache.kv_cache import KVCacheManager
 from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
-from miniserve.engine.request import SamplingParams
+from miniserve.engine.request import RequestState, SamplingParams
 from miniserve.engine.sampler import Sampler
 from miniserve.model.transfer import CopyFence
 from miniserve.spec.draft import DraftRunner
@@ -138,11 +138,33 @@ def _toy_draft(model, num_blocks: int, block_size: int) -> DraftRunner:
     draft.pool = None
     draft.fence = CopyFence("cpu")
     draft.tables = {}
-    draft.graphs = None
+    draft.graphs = draft.first_graphs = None
+    draft.use_first_graphs = False
     return draft
 
 
-def _toy_spec_engine(num_blocks: int, block_size: int, gamma: int, agree: str, **kw) -> SpecEngine:
+class _ToyGraphs:
+    """Stands in for ``DecodeGraphs`` of some width: the same call, run eagerly on the toy
+    model. What it checks is the host side of a graph pass: the inputs, slots and fills the
+    round builds for a fixed width, and which rows of logits it takes back."""
+
+    def __init__(self, model, width: int, max_batch: int = 8):
+        self.model, self.width, self.max_batch = model, width, max_batch
+        self.runs = 0
+
+    def run(self, ids, pos, slots, tables, fill=None):
+        assert len(ids) == len(pos) == len(slots) == len(tables) * self.width
+        self.runs += 1
+        self.model.plan(True, [self.width] * len(tables), tables, slots)
+        ids_t = torch.tensor(ids)
+        if fill is not None:
+            ids_t.index_copy_(0, *fill)
+        return self.model.decode_logits(ids_t, torch.tensor(pos), None)
+
+
+def _toy_spec_engine(
+    num_blocks: int, block_size: int, gamma: int, agree: str, graphs: bool = False, **kw
+) -> SpecEngine:
     eng = SpecEngine.__new__(SpecEngine)
     Engine.__init__(
         eng,
@@ -154,6 +176,11 @@ def _toy_spec_engine(num_blocks: int, block_size: int, gamma: int, agree: str, *
     )
     eng.draft = _toy_draft(_ToyModel(lambda t: _draft_next(t, agree)), num_blocks, block_size)
     eng._gamma, eng._fill_idx = 0, {}
+    eng._cuda_graph, eng._round_graphs, eng._verify_graphs = False, graphs, {}
+    if graphs:
+        eng._verify_graphs[gamma] = _ToyGraphs(eng.runner.model, gamma + 1)
+        eng.draft.first_graphs = _ToyGraphs(eng.draft.model, 2)
+        eng.draft.use_first_graphs = True
     eng.gamma = gamma
     eng.spec_stats = dict(rounds=0, rows=0, proposed=0, accepted=0, tokens=0)
     return eng
@@ -181,12 +208,15 @@ PROMPTS = [[3, 1, 4, 1, 5, 9, 2, 6], [2, 7, 1, 8], [1] * 20, [11, 22, 33, 44, 55
 @pytest.mark.parametrize("agree", ["always", "sometimes", "never"])
 @pytest.mark.parametrize("gamma", [1, 2, 4])
 @pytest.mark.parametrize("chunk", [0, 2048])
-def test_speculation_does_not_change_the_output(gamma, agree, chunk):
+@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "graphs"])
+def test_speculation_does_not_change_the_output(gamma, agree, chunk, graphs):
     """The property the whole design rests on, over every acceptance pattern:
-    full acceptance (which leaves the draft a token behind), partial, and none."""
+    full acceptance (which leaves the draft a token behind), partial, and none; and over
+    both ways a round runs (with graphs, the draft's first step feeds two tokens per
+    request, recomputing one it already had)."""
     params = SamplingParams(24)
     plain = _generate(_toy_engine(64, 4, chunked_prefill_size=chunk), PROMPTS, params)
-    eng = _toy_spec_engine(64, 4, gamma, agree, chunked_prefill_size=chunk)
+    eng = _toy_spec_engine(64, 4, gamma, agree, graphs=graphs, chunked_prefill_size=chunk)
     assert _generate(eng, PROMPTS, params) == plain
     assert eng.spec_stats["rounds"] > 0
     if agree == "always":
@@ -237,16 +267,55 @@ def test_a_round_stops_at_the_stop_token(agree):
 
 @pytest.mark.parametrize("agree", ["always", "sometimes"])
 @pytest.mark.parametrize("num_blocks", [12, 20])
-def test_speculation_under_kv_pressure(num_blocks, agree):
+@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "graphs"])
+def test_speculation_under_kv_pressure(num_blocks, agree, graphs):
     """A pool too small for every request at once: preemption, readmission, and a draft
     cache that has to be thrown away and recomputed with it."""
     params = SamplingParams(20)
     plain = _generate(_toy_engine(num_blocks, 4), PROMPTS, params)
-    eng = _toy_spec_engine(num_blocks, 4, 4, agree)
+    eng = _toy_spec_engine(num_blocks, 4, 4, agree, graphs=graphs)
     assert _generate(eng, PROMPTS, params) == plain
     assert eng.scheduler.num_preemptions > 0, "the pool was not tight enough to preempt"
     assert not eng.draft.tables, "a draft cache outlived its request"
     assert eng.draft.allocator.num_free == eng.draft.allocator.num_blocks
+
+
+@pytest.mark.parametrize("agree", ["always", "sometimes", "never"])
+def test_a_round_replays_its_graphs(agree):
+    """Every round of a steady decode batch takes the graph paths: the verify pass, and the
+    draft's first step with every request fed two tokens (whatever the last round accepted)."""
+    eng = _toy_spec_engine(64, 4, 3, agree, graphs=True)
+    _generate(eng, PROMPTS, SamplingParams(24))
+    rounds = eng.spec_stats["rounds"]
+    assert eng._verify_graphs[3].runs == rounds
+    assert eng.draft.first_graphs.runs == rounds
+
+
+def test_round_graphs_can_be_switched_off():
+    params = SamplingParams(20)
+    plain = _generate(_toy_engine(64, 4), PROMPTS, params)
+    eng = _toy_spec_engine(64, 4, 3, "sometimes", graphs=True)
+    eng.round_graphs = False
+    assert _generate(eng, PROMPTS, params) == plain
+    assert eng._verify_graphs[3].runs == eng.draft.first_graphs.runs == 0
+
+
+def test_requests_reaching_decode_together_share_one_draft_prefill():
+    """The draft's prefill packs requests into passes rather than running one per request."""
+    eng = _toy_spec_engine(64, 4, 3, "sometimes")
+    reqs = [eng.add_request(p, SamplingParams(8)) for p in PROMPTS]
+    eng.step()  # the target's prefill of all four, then the draft's
+    assert all(r.state is RequestState.DECODE for r in reqs)
+    assert eng.draft.model.passes == 1
+    assert all(eng.draft.covered(r.rid) == r.seq_len - 1 for r in reqs)
+
+
+def test_a_draft_prefill_longer_than_a_pass_continues_in_order():
+    eng = _toy_spec_engine(64, 4, 3, "sometimes")
+    eng.draft.max_prefill_tokens = 5  # the prompts hold 8, 4, 20 and 7 tokens
+    params = SamplingParams(12)
+    plain = _generate(_toy_engine(64, 4), PROMPTS, params)
+    assert _generate(eng, PROMPTS, params) == plain
 
 
 def test_the_draft_never_holds_more_tokens_than_the_target():
@@ -346,6 +415,83 @@ def test_the_drafts_graphs_propose_what_eager_proposes(qwen3):
         runs[graphs] = (eng.generate(prompts, params), eng.acceptance)
     assert runs[True][0] == runs[False][0]
     assert runs[True][1] == runs[False][1] == 1.0, f"graphs {runs[True][1]}, eager {runs[False][1]}"
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+@pytest.mark.parametrize("gamma", [1, 4])
+@pytest.mark.parametrize("lens", [[40], [5, 900, 2500], [300, 7, 1200, 64, 2000, 33]])
+def test_a_verify_graph_matches_the_eager_pass(qwen3, gamma, lens):
+    """A verify pass replayed from a graph of width gamma + 1 against the same pass run eagerly:
+    every position's logits within the tolerance, and the padding rows write nothing but the
+    dummy block. The graphs were captured over sequences as short as the width, so this also
+    checks that planning long sequences updates what the replay reads."""
+    import random
+
+    from anchor import EPS
+
+    rng = random.Random(len(lens) * 10 + gamma)
+    eng = SpecEngine(qwen3, qwen3, gamma=gamma, max_running=8, kv_pool_tokens=8192)
+    runner, graphs, width = eng.runner, eng._verify_graphs[gamma], gamma + 1
+    tables = [runner.allocator.new_table() for _ in lens]
+    runner.reserve(tables, lens)
+    prompt_ids = [rng.randrange(150_000) for _ in range(sum(lens))]
+    runner.forward_tokens(tables, prompt_ids, [p for n in lens for p in range(n)], lens)
+    ids = [rng.randrange(150_000) for _ in range(len(lens) * width)]
+    pos = [p for n in lens for p in range(n, n + width)]
+    runner.reserve(tables, [width] * len(lens))
+    slots = [s for t in tables for s in t.tail_slots(width)]
+    before = runner.pool.buf.cpu()
+    runner.fence.wait()
+    graph_logits = graphs.run(ids, pos, slots, tables).float().clone()
+    after = runner.pool.buf.cpu()
+    bs, dummy = runner.pool.block_size, graphs.dummy_block
+    changed = (before != after).flatten(4).any(-1).any(0).any(0)  # [blocks, block_size]
+    del before, after
+    assert {b * bs + o for b, o in changed.nonzero().tolist() if b != dummy} == set(slots)
+    for t in tables:
+        t.rewind(width)
+    runner.reserve(tables, [width] * len(lens))
+    eager_logits = runner.forward_tokens(tables, ids, pos, [width] * len(lens)).float()
+    diff = (graph_logits - eager_logits).abs().max().item()
+    top2 = eager_logits.topk(2, dim=-1).values
+    decisive = (top2[:, 0] - top2[:, 1]) > 2 * diff
+    print(f"\n[{len(lens)} rows, width {width}] verify graph vs eager max|d| {diff}")
+    assert diff <= EPS
+    assert torch.equal(graph_logits.argmax(-1)[decisive], eager_logits.argmax(-1)[decisive])
+    for t in tables:
+        t.release()
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_the_drafts_first_step_graph_matches_eager(qwen3):
+    """The draft's first step, width 2, graph against eager: the logits of each request's last token."""
+    import random
+
+    from anchor import EPS
+
+    rng = random.Random(3)
+    lens = [9, 700, 31, 1500, 2]
+    eng = SpecEngine(qwen3, qwen3, gamma=3, max_running=8, kv_pool_tokens=8192)
+    draft = eng.draft
+    rids = list(range(len(lens)))
+    for rid, n in zip(rids, lens):
+        draft.admit(rid)
+    draft.prefill([(rid, [rng.randrange(150_000) for _ in range(n)]) for rid, n in zip(rids, lens)])
+    feed = [[rng.randrange(150_000), rng.randrange(150_000)] for _ in lens]
+    tables = [draft.tables[r] for r in rids]
+    out = {}
+    for graphs in (True, False):
+        draft.use_first_graphs = graphs
+        out[graphs] = draft._extend(tables, feed, lens).float().clone()
+        for t in tables:
+            t.rewind(2)
+    assert draft.first_graphs is not None
+    diff = (out[True] - out[False]).abs().max().item()
+    print(f"\n[{len(lens)} rows, width 2] draft first-step graph vs eager max|d| {diff}")
+    assert diff <= EPS
+    assert torch.equal(out[True].argmax(-1), out[False].argmax(-1))
 
 
 @pytest.mark.gpu

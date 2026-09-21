@@ -207,6 +207,8 @@ ABLATIONS = {
     # (smaller) KV pool and has no decode graphs -- it is the spec path without
     # speculation, not the plain engine. Compare with a separate run for that.
     "spec": ("spec_off", "spec_g2", "spec_g4", "spec_g6"),
+    # A round's graphs (verify pass, the draft's first step) on and off, at --spec-gamma.
+    "spec_graph": ("round_graph", "round_eager"),
     "none": ("default",),
 }
 
@@ -235,6 +237,11 @@ def set_arm(eng: Engine, arm: str) -> None:
             raise SystemExit("--ablate spec needs a draft model (--spec-draft)")
         kv.set_radix(kv.radix)
         eng.gamma = 0 if arm == "spec_off" else int(arm.removeprefix("spec_g"))
+    elif arm in ("round_graph", "round_eager"):
+        if not isinstance(eng, SpecEngine) or not eng.gamma:
+            raise SystemExit("--ablate spec_graph needs a draft model (--spec-draft) and --spec-gamma > 0")
+        kv.set_radix(kv.radix)
+        eng.round_graphs = arm == "round_graph"
     elif arm.startswith("chunk_"):
         kv.set_radix(kv.radix)
         eng.scheduler.chunked_prefill_size = 0 if arm == "chunk_off" else int(arm.removeprefix("chunk_"))

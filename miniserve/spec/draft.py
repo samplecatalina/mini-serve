@@ -17,6 +17,15 @@ Nothing here reads device memory back to the host: a whole round of proposals
 is queued, each step taking the previous step's tokens straight from the device
 (the same trick overlap scheduling uses between steps), and the engine reads the
 proposals back once, together with the target's verdict.
+
+Every step of a round can replay a captured graph. The single-token steps use
+decode graphs. The first step feeds each request what it is missing, which is
+one token after most rounds and two after a round in which every proposal was
+accepted; so the engine makes it two for every request, by rewinding the ones
+that miss a single token by one more and feeding that token again, and the
+step replays a graph of width 2. Recomputing a token's KV from the same inputs
+changes nothing the target sees: the draft's numbers only decide what gets
+proposed, never what gets accepted.
 """
 
 from __future__ import annotations
@@ -32,6 +41,9 @@ from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
 from miniserve.model.attention import FlashInferPagedAttention
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 from miniserve.model.transfer import CopyFence, to_device
+
+# Tokens a round's first step feeds every request when it runs as a graph (see above).
+FIRST_WIDTH = 2
 
 
 class DraftRunner:
@@ -50,7 +62,7 @@ class DraftRunner:
         ``workspace``: the target's FlashInfer workspace, reused because only one pass
         runs at a time; None allocates a second one.
         ``cuda_graph``: capture decode graphs for the steps that feed a single token
-        (all but the first of a round)."""
+        (all but the first of a round), and graphs of width 2 for the first step."""
         cfg = model.cfg
         self.model = model
         self.device = model.device
@@ -65,10 +77,11 @@ class DraftRunner:
         self.fence = CopyFence(model.device)
         self.tables: dict[int, BlockTable] = {}
         self.graphs: DecodeGraphs | None = None
+        self.first_graphs: DecodeGraphs | None = None
+        # Whether a round's first step replays ``first_graphs`` (switchable at run time).
+        self.use_first_graphs = cuda_graph
         if cuda_graph:
-            self.graphs = DecodeGraphs(
-                model,
-                self.pool,
+            common = dict(
                 dummy_block=num_blocks,
                 buckets=graph_buckets(cuda_graph_max_bs),
                 workspace=self.attn.workspace,
@@ -76,6 +89,8 @@ class DraftRunner:
                 scale=model.attn_scale,
                 fence=self.fence,
             )
+            self.graphs = DecodeGraphs(model, self.pool, **common)
+            self.first_graphs = DecodeGraphs(model, self.pool, width=FIRST_WIDTH, **common)
 
     # ------------------------------------------------------------------ per request
 
@@ -100,14 +115,29 @@ class DraftRunner:
             table.rewind(table.num_tokens - num_tokens)
 
     @torch.inference_mode()
-    def prefill(self, rid: int, token_ids: Sequence[int]) -> None:
-        """Compute the KV of ``token_ids`` (from position 0), in chunks, discarding the logits."""
-        table = self.tables[rid]
-        if table.num_tokens:
-            raise RuntimeError(f"request {rid} already has {table.num_tokens} draft tokens")
-        for start in range(0, len(token_ids), self.max_prefill_tokens):
-            chunk = list(token_ids[start : start + self.max_prefill_tokens])
-            self._extend([table], [chunk], [start])
+    def prefill(self, items: Sequence[tuple[int, Sequence[int]]]) -> None:
+        """Compute the KV of each ``(rid, token_ids)`` (from position 0), discarding the logits.
+
+        The requests share passes of up to ``max_prefill_tokens`` tokens: requests that reach
+        the decode phase together are prefilled together, not one pass each. A request longer
+        than the room left in a pass continues in the next one, so its chunks stay in order."""
+        rows: list[tuple[BlockTable, list[int], int]] = []
+        used = 0
+        for rid, token_ids in items:
+            table = self.tables[rid]
+            if table.num_tokens:
+                raise RuntimeError(f"request {rid} already has {table.num_tokens} draft tokens")
+            start = 0
+            while start < len(token_ids):
+                if used == self.max_prefill_tokens:
+                    self._extend(*map(list, zip(*rows)))
+                    rows, used = [], 0
+                n = min(len(token_ids) - start, self.max_prefill_tokens - used)
+                rows.append((table, list(token_ids[start : start + n]), start))
+                used += n
+                start += n
+        if rows:
+            self._extend(*map(list, zip(*rows)))
 
     # ------------------------------------------------------------------ a round
 
@@ -135,7 +165,8 @@ class DraftRunner:
         return torch.stack(proposals, dim=1)
 
     def _extend(self, tables: list[BlockTable], ids: Sequence[Sequence[int]], starts: Sequence[int]) -> torch.Tensor:
-        """Several new tokens per sequence, eagerly: logits ``[B, vocab]`` of the last of each."""
+        """Several new tokens per sequence: logits ``[B, vocab]`` of the last of each. Replays a
+        graph of width 2 when every sequence has exactly two, eager otherwise."""
         qo_lens = [len(x) for x in ids]
         for t, n in zip(tables, qo_lens):
             t.append_tokens(n)
@@ -143,6 +174,14 @@ class DraftRunner:
         flat = [i for row in ids for i in row]
         pos = [p for s, n in zip(starts, qo_lens) for p in range(s, s + n)]
         self.fence.wait()
+        g = self.first_graphs
+        if (
+            self.use_first_graphs
+            and g is not None
+            and len(tables) <= g.max_batch
+            and all(n == g.width for n in qo_lens)
+        ):
+            return g.run(flat, pos, slots, tables)[g.width - 1 :: g.width]
         self.attn.plan(True, qo_lens, tables, slots)
         ids_t = to_device(flat, torch.long, self.device)
         pos_t = to_device(pos, torch.long, self.device)

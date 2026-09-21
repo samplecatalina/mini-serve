@@ -1,4 +1,4 @@
-"""CUDA Graphs for decode steps.
+"""CUDA Graphs for decode steps, and for passes of a fixed number of tokens per row.
 
 An eager decode forward is several hundred kernel launches (about two dozen
 per layer), each a round trip through Python and the CUDA driver. For a small
@@ -19,10 +19,18 @@ A graph replays fixed kernels on fixed addresses, so:
   buffers fixed at wrapper construction.
 - Sampling stays outside the graph: its parameters change per step, and an
   all-greedy batch only needs an argmax.
+
+The same machinery captures passes of ``width > 1`` new tokens per row, all
+rows alike: a speculative round verifies ``gamma + 1`` positions per request,
+and the draft model's first step feeds it two. Those are extend passes, run
+by FlashInfer's prefill wrapper in its CUDA Graph mode; the query layout is
+fixed (``width`` rows per sequence), the KV layout is planned every step as
+for decode.
 """
 
 from __future__ import annotations
 
+import functools
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -56,6 +64,14 @@ def bucket_for(buckets: Sequence[int], batch_size: int) -> int:
     raise ValueError(f"batch of {batch_size} exceeds the largest graph bucket {buckets[-1]}")
 
 
+@functools.cache
+def _warmup_stream(device: torch.device) -> torch.cuda.Stream:
+    """The side stream every capture warms up on. One per device for the whole process:
+    cuBLAS keeps a workspace for each stream it has run on, for as long as the process
+    lives, so a new stream per capture leaks one workspace per captured graph."""
+    return torch.cuda.Stream(device)
+
+
 class _GraphAttention:
     """Attention backend used inside a captured decode graph: fixed slot buffer, fixed wrapper."""
 
@@ -73,10 +89,12 @@ class _GraphAttention:
 
 
 class DecodeGraphs:
-    """One captured decode forward per bucket, sharing input buffers and a memory pool.
+    """One captured forward per bucket, sharing input buffers and a memory pool.
 
     ``dummy_block`` is a block of ``pool`` outside the allocator: padding rows
-    attend to it and write their K/V into it.
+    attend to it and write their K/V into it. ``width``: new tokens per row
+    (1 for decode steps); a padding row writes ``width`` slots of the dummy
+    block, so it may not exceed the block size.
     """
 
     def __init__(
@@ -89,10 +107,14 @@ class DecodeGraphs:
         num_heads: int,
         scale: float,
         fence: CopyFence,
+        width: int = 1,
     ):
         """``fence``: the model runner's; marked once this step's inputs are queued for copying."""
         import flashinfer
 
+        if not 1 <= width <= pool.block_size:
+            raise ValueError(f"width must be in [1, {pool.block_size}] (the block size), got {width}")
+        self.width = width
         self.model = model
         self.pool = pool
         self.dummy_block = dummy_block
@@ -101,8 +123,8 @@ class DecodeGraphs:
         dev = pool.device
         gmax = self.buckets[-1]
         # ids, positions, slots: one pinned staging tensor, one copy per step.
-        self._staging = torch.zeros(3, gmax, dtype=torch.long).pin_memory()
-        self._inputs = torch.zeros(3, gmax, dtype=torch.long, device=dev)
+        self._staging = torch.zeros(3, gmax * width, dtype=torch.long).pin_memory()
+        self._inputs = torch.zeros(3, gmax * width, dtype=torch.long, device=dev)
         i32 = dict(dtype=torch.int32, device=dev)
         self._indptr = torch.zeros(gmax + 1, **i32)
         # Page indices of a whole batch. With prefix caching several sequences list the same
@@ -120,19 +142,37 @@ class DecodeGraphs:
             non_blocking=True,
         )
         tensor_cores = num_heads // pool.num_kv_heads >= 4
-        self._wrappers = {
-            g: flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                workspace,
-                kv_layout="NHD",
-                use_cuda_graph=True,
-                use_tensor_cores=tensor_cores,
-                paged_kv_indptr_buffer=self._indptr[: g + 1],
-                paged_kv_indices_buffer=self._indices,
-                paged_kv_last_page_len_buffer=self._last[:g],
-                backend="fa2",
-            )
-            for g in self.buckets
-        }
+        if width == 1:
+            self._wrappers = {
+                g: flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                    workspace,
+                    kv_layout="NHD",
+                    use_cuda_graph=True,
+                    use_tensor_cores=tensor_cores,
+                    paged_kv_indptr_buffer=self._indptr[: g + 1],
+                    paged_kv_indices_buffer=self._indices,
+                    paged_kv_last_page_len_buffer=self._last[:g],
+                    backend="fa2",
+                )
+                for g in self.buckets
+            }
+        else:
+            # Every row has ``width`` queries, so the query layout is the same at every step.
+            self._qo_indptr = torch.arange(0, (gmax + 1) * width, width, **i32)
+            self._qo_indptr_host = self._qo_indptr.cpu().pin_memory()
+            self._wrappers = {
+                g: flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                    workspace,
+                    kv_layout="NHD",
+                    use_cuda_graph=True,
+                    qo_indptr_buf=self._qo_indptr[: g + 1],
+                    paged_kv_indptr_buf=self._indptr[: g + 1],
+                    paged_kv_indices_buf=self._indices,
+                    paged_kv_last_page_len_buf=self._last[:g],
+                    backend="fa2",
+                )
+                for g in self.buckets
+            }
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._logits: dict[int, torch.Tensor] = {}
 
@@ -149,18 +189,20 @@ class DecodeGraphs:
         return self.buckets[-1]
 
     def _forward(self, g: int) -> torch.Tensor:
-        attn = _GraphAttention(self.pool, self._inputs[2, :g], self._wrappers[g])
-        return self.model.decode_logits(self._inputs[0, :g], self._inputs[1, :g], attn)
+        n = g * self.width
+        attn = _GraphAttention(self.pool, self._inputs[2, :n], self._wrappers[g])
+        return self.model.decode_logits(self._inputs[0, :n], self._inputs[1, :n], attn)
 
     @torch.inference_mode()
     def _capture_all(self) -> None:
         mempool = torch.cuda.graph_pool_handle()
         dummy = [self.dummy_block]
+        w = self.width
         for g in reversed(self.buckets):  # largest first: smaller graphs reuse its pool memory
-            self._stage([0] * g, [0] * g, [self.dummy_block * self.pool.block_size] * g, g)
-            self._plan(g, [dummy] * g, [1] * g)
+            self._stage([], [], [], g)
+            self._plan(g, [dummy] * g, [w] * g)
             # Lazy initialization (cuBLAS handles, kernel selection) must not happen during capture.
-            side = torch.cuda.Stream(self.pool.device)
+            side = _warmup_stream(self.pool.device)
             side.wait_stream(torch.cuda.current_stream(self.pool.device))
             with torch.cuda.stream(side):
                 for _ in range(2):
@@ -173,16 +215,18 @@ class DecodeGraphs:
             torch.cuda.synchronize(self.pool.device)  # the staging buffer is rewritten next round
 
     def _stage(self, ids: Sequence[int], pos: Sequence[int], slots: Sequence[int], g: int) -> None:
-        """Write the per-row inputs, padded to ``g`` rows, into the static input buffer."""
-        b = len(ids)
-        pad_slot = self.dummy_block * self.pool.block_size
+        """Write the per-token inputs (``width`` per row), padded to ``g`` rows, into the static
+        input buffer. A padding row takes positions and dummy-block slots ``0 .. width - 1``."""
+        n, w = len(ids), self.width
         s = self._staging
-        s[0, :b] = torch.tensor(ids, dtype=torch.long)
-        s[1, :b] = torch.tensor(pos, dtype=torch.long)
-        s[2, :b] = torch.tensor(slots, dtype=torch.long)
-        if g > b:
-            s[0:2, b:g] = 0
-            s[2, b:g] = pad_slot
+        s[0, :n] = torch.tensor(ids, dtype=torch.long)
+        s[1, :n] = torch.tensor(pos, dtype=torch.long)
+        s[2, :n] = torch.tensor(slots, dtype=torch.long)
+        if g * w > n:
+            pad = torch.arange(w, dtype=torch.long).repeat(g - n // w)
+            s[0, n : g * w] = 0
+            s[1, n : g * w] = pad
+            s[2, n : g * w] = pad + self.dummy_block * self.pool.block_size
         # The whole buffer: a copy out of a slice of it would go through a pageable temporary
         # (non-contiguous), which waits for the device. Rows past g are never read by graph g.
         self._inputs.copy_(s, non_blocking=True)
@@ -197,8 +241,14 @@ class DecodeGraphs:
         i32 = dict(dtype=torch.int32, device=dev)
         # FlashInfer copies ``indices`` into its buffer non-blocking only from the same device
         # (a host tensor, even pinned, is copied synchronously), so it goes up first.
+        kv = (pinned(indptr, **i32), to_device(indices, torch.int32, dev), pinned(list(last_lens), **i32))
+        if self.width == 1:
+            self._wrappers[g].plan(*kv, **self._plan_args)
+            return
+        args = dict(self._plan_args)
+        head_dim = args.pop("head_dim")
         self._wrappers[g].plan(
-            pinned(indptr, **i32), to_device(indices, torch.int32, dev), pinned(list(last_lens), **i32), **self._plan_args
+            self._qo_indptr_host[: g + 1], *kv, head_dim_qk=head_dim, causal=True, **args
         )
 
     def run(
@@ -209,11 +259,15 @@ class DecodeGraphs:
         tables: Sequence[BlockTable],
         fill: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Decode logits ``[B, vocab]`` for B sequences, one new token each; ``tables`` already
-        cover the new token. ``fill = (rows, tokens)``: device tensors overriding the token ids
-        of those rows (tokens sampled by the previous step, not known on the host). The returned
-        tensor is a view of the graph's output buffer, valid until the next replay."""
+        """Logits ``[B * width, vocab]`` for B sequences, ``width`` new tokens each (one row of
+        logits per token); ``tables`` already cover the new tokens, and ``ids``, ``pos`` and
+        ``slots`` list them sequence by sequence. ``fill = (rows, tokens)``: device tensors
+        overriding the token ids at those positions (tokens produced on the device, not known
+        on the host). The returned tensor is a view of the graph's output buffer, valid until
+        the next replay."""
         b = len(tables)
+        if len(ids) != b * self.width:
+            raise ValueError(f"{len(ids)} tokens for {b} sequences of width {self.width}")
         g = bucket_for(self.buckets, b)
         self._stage(ids, pos, slots, g)
         if fill is not None:
@@ -222,8 +276,8 @@ class DecodeGraphs:
         self._plan(
             g,
             [t.blocks for t in tables] + [[self.dummy_block]] * pad,
-            [t.last_block_len for t in tables] + [1] * pad,
+            [t.last_block_len for t in tables] + [self.width] * pad,
         )
         self.fence.mark()
         self._graphs[g].replay()
-        return self._logits[g][:b]
+        return self._logits[g][: b * self.width]
