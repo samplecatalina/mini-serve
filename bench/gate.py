@@ -176,8 +176,10 @@ def main() -> int:
         # verdict is the only thing a caller might want to separate out.
         print(line)
         ok &= passed
-    print(f"gate: {'pass' if ok else 'FAIL'} ({elapsed:.0f} s)",
-          file=sys.stdout if ok else sys.stderr)
+    # Everything on one stream: a caller that redirects output wants the
+    # verdict next to the lines it followed from, and the exit code is what
+    # says pass or fail.
+    print(f"gate: {'pass' if ok else 'FAIL'} ({elapsed:.0f} s)", flush=True)
     return 0 if ok else 1
 
 
