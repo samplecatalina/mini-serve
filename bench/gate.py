@@ -54,6 +54,13 @@ COMMON = [
     "--suffix-len", "32",
     "--output-len", "96",
     "--rounds", "3",
+    # Pinned, not left to the engine's own sizing. Without this the pool is
+    # derived from whatever GPU memory happens to be free, which on a desktop
+    # machine moves by hundreds of megabytes between one day and the next; a
+    # larger pool preempts less and reads as a throughput gain that no change
+    # to this repository caused. A run that cannot get these tokens fails
+    # rather than quietly taking fewer.
+    "--kv-pool-tokens", "32768",
 ]
 
 ARMS = {
