@@ -7,6 +7,12 @@ IMAGE       ?= miniserve-dev:latest
 # The load generator lives in its own image: the same client must measure every
 # engine being compared, and it has no business inside the engine's pinned env.
 BENCH_IMAGE ?= miniserve-bench:latest
+# The blueprint at its pinned commit, built from the Dockerfile that commit
+# ships, so the second baseline is the blueprint's own environment and not a
+# guess at it. Its caches must be writable by the invoking user, so they live
+# in their own volume rather than in the image's home directory.
+BLUEPRINT_IMAGE ?= minisgl-9a91cfa:blueprint
+BLUEPRINT_VOL   ?= minisgl-cache
 CACHE_VOL   ?= miniserve-cache
 DOCKER_RUN  := docker run --rm --gpus all --ipc=host \
                --user $(shell id -u):$(shell id -g) \
@@ -38,7 +44,7 @@ NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
 NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
 NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile gate bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif minicore minicore-test minicore-clean
+.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile gate blueprint-cache bench-blueprint bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif minicore minicore-test minicore-clean
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -50,6 +56,7 @@ help:
 	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests; BLOCK_BACKEND=cpp)"
 	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
 	@echo "gate       the pre-merge throughput check against results/<device>/gate_baseline.json"
+	@echo "bench-blueprint  the same requests against mini-sglang in its own image (BENCH_ARGS=dump|run|table ...)"
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench-roofline   this GPU's copy bandwidth and BF16 GEMM rate: the denominators"
 	@echo "charts     draw the ablation figures from the result rows (CHART_DEVICE=l40s)"
@@ -111,6 +118,25 @@ bench-offline:
 
 # The check a change has to clear before it is merged: a short benchmark on this
 # GPU against a recorded baseline. GATE_ARGS='--update' records a new one.
+BLUEPRINT_RUN := docker run --rm --gpus all --ipc=host \
+                 --user $(shell id -u):$(shell id -g) --entrypoint python \
+                 -v $(CURDIR):/workspace -v $(CACHE_VOL):/cache -v $(BLUEPRINT_VOL):/bpcache -w /workspace \
+                 -e PYTHONPATH=/workspace -e HOME=/bpcache -e HF_HOME=/bpcache/hf \
+                 -e TVM_FFI_CACHE_DIR=/bpcache/tvm-ffi -e FLASHINFER_WORKSPACE_BASE=/bpcache/flashinfer
+
+# The blueprint image's caches belong to the user who will run it.
+blueprint-cache:
+	docker volume create $(BLUEPRINT_VOL) >/dev/null
+	docker run --rm -v $(BLUEPRINT_VOL):/bpcache alpine:3.20 sh -c \
+		'mkdir -p /bpcache/hf /bpcache/tvm-ffi /bpcache/flashinfer && chown -R $(shell id -u):$(shell id -g) /bpcache'
+
+# The second baseline: the same requests, as token ids, replayed against the
+# blueprint's own offline entry point in the blueprint's own image.
+bench-blueprint: blueprint-cache
+	$(BLUEPRINT_RUN) \
+		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		$(BLUEPRINT_IMAGE) -m bench.blueprint $(BENCH_ARGS)
+
 gate:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
