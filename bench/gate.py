@@ -168,13 +168,16 @@ def main() -> int:
     for arm in ARMS:
         was = base["arms"].get(arm)
         if was is None:
-            print(f"{arm}: no baseline for this arm; rerun with --update", file=sys.stderr)
+            print(f"{arm}: no baseline for this arm; rerun with --update")
             ok = False
             continue
         passed, line = compare(arm, measured[arm], was)
-        print(line, file=sys.stdout if passed else sys.stderr)
+        # One stream for the per-arm lines, so they keep their order; the
+        # verdict is the only thing a caller might want to separate out.
+        print(line)
         ok &= passed
-    print(f"gate: {'pass' if ok else 'FAIL'} ({elapsed:.0f} s)")
+    print(f"gate: {'pass' if ok else 'FAIL'} ({elapsed:.0f} s)",
+          file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
 
 
