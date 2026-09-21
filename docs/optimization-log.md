@@ -96,3 +96,52 @@ platform yet, so only the sglang 0.5.10 percentages above are available.
 Correctness: the same greedy anchor prompts were generated on all three devices used so far (RTX 4060 Laptop,
 L40S, H100) from the same image and the same code. On every device the engine differs from that device's own
 reference path only at BF16 near-ties, under the tolerance policy in `docs/design.md`.
+
+### The second baseline: the blueprint on the development GPU
+
+This engine was written from [mini-sglang](https://github.com/sgl-project/mini-sglang) at the pinned commit,
+so the comparison that says most about its design decisions is against that, not only against a production
+server. The blueprint ships a Dockerfile on that commit, from the same CUDA base image as this project's, so
+it runs here in its own environment. Both engines have an in-process offline entry point that takes token ids
+and returns token ids, so the comparison is engine to engine: no HTTP, no load generator, and neither side
+tokenizes anything, which means a tokenizer difference cannot appear as an engine difference. The requests are
+generated once and replayed on both sides; both import the same preflight, GPU sampling and warm-up rule.
+Settings are matched from one place in the harness and read back off each engine afterwards, and the arm that
+did not end up running what was asked refuses to write results.
+
+Measured on the RTX 4060 Laptop GPU, KV pool pinned to 32,768 tokens on both sides (matched on tokens: the two
+page it differently, 16 tokens per block here against one per page there), 256 running requests, graph buckets
+to 256, 8192 tokens per forward pass, same weights snapshot, same torch build, alternating four processes of
+three runs each, 30 s of warm-up discarded on both sides.
+
+| Hypothesis | Prediction | Measured | Difference | Evidence |
+|---|---|---|---|---|
+| Two engines of the same architecture, on a workload the pool cannot hold all at once. 256 requests, 128-token prompts, 96 output tokens, nothing shared. | 85–100% of the blueprint, since this engine reached 101.7% of sglang 0.5.10 at 256 concurrency on the L40S and the blueprint is the simpler of the two. | **65.6%** (3,071.5 against 4,680.5 tok/s; run-to-run spread 0.12% and 0.25%). | Wrong, and the reason is the pool. That 101.7% was measured with a 335k-token pool, where 256 requests fit and scheduling barely matters; here the pool holds 32k and they do not. Admitting against a block budget puts more requests in flight than the pool holds: **81 preemptions recompute 46,519 prefill tokens against 32,768 in the prompts, 42% more**. The blueprint reserves each request's whole run up front and never preempts, so its prefill equals its prompts exactly. **The same design decision changes sign with the pool size.** | `results/rtx4060-laptop/m4_4_blueprint.csv` |
+| The same comparison where a quarter of the requests ask for eight times as many tokens as the rest, so a reservation has to cover an unequal run. | Not predicted separately; run to test the attribution above. | **75.9%** (1,710.7 against 2,255.4 tok/s), with preemptions down from 81 to 18 and recomputed prefill down from 42% to 5.7%. | Moves with the preemption count and in the same direction, which is what the attribution predicts. | `results/rtx4060-laptop/m4_4_blueprint_mixed.csv` |
+| A third workload, sixteen groups sharing a prefix, measured the same way. | — | The blueprint's **first measured run of every process was 19% slower than its next two** (4,546 against 5,629 tok/s), reproduced line for line in two independent processes, and a longer warm-up does not remove it. | Not an engine difference: repeating one workload leaves the previous run's blocks in the prefix cache, and the blueprint's pool keeps them where this engine's evicts them (its hit rate is identical on all six runs). Without shared prefixes the same effect is 4.2%; with nothing shared at all, 0.25%. **Alternating runs of one workload rewards whichever engine retains more of it**, so that ratio measures the protocol. Discarding the first run would be choosing data after seeing it; the numbers are kept as the evidence for the effect. | `results/rtx4060-laptop/m4_4_blueprint_policy_blueprint.csv` |
+
+What these numbers do not cover, and it matters for reading them: every workload here runs with `ignore_eos`
+and a fixed token count, so **no request ever finishes early**. The stated reason for admitting against a block
+budget rather than reserving each request's whole run is that a reservation is wasted whenever a request stops
+early — and that gain cannot appear in any of these measurements. A workload with stop tokens would be needed
+to show it, and would break comparability with every earlier figure in this file, so it is not in the harness
+today.
+
+### A check before merging
+
+Since M4 a change has to clear a short benchmark on the development GPU before it is merged (`make gate`):
+two arms, 256 requests with nothing shared and the same requests behind a shared prefix, against a recorded
+baseline in `results/rtx4060-laptop/gate_baseline.json`. 88 seconds, and it fails on a gain past the threshold
+as well, because a baseline that is only ever allowed to be met stops being a baseline.
+
+The threshold is 5%, which is worth stating against the noise it has to clear: four processes of three runs
+each on one commit stayed inside 0.81%, runs within one recording inside 0.20–0.43%, and the drift across
+commits that do not touch the engine is 0.5–0.7%. So the line sits about seven times the largest of those.
+For a check a person runs by hand, a false alarm costs more than a missed one — a few false alarms and the
+check gets skipped.
+
+One thing the caliber has to pin, and one it must not. The KV pool is pinned: left to the engine it is derived
+from whatever GPU memory is free, and one run of the check took 42,096 tokens where the baseline had 32,768 —
+a larger pool preempts less, which reads as a gain that no change to the code caused. The chunked-prefill
+budget is deliberately not pinned: it is the engine's own default, and a change to it is exactly what the
+check exists to report.
