@@ -37,7 +37,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from miniserve.model.transfer import CopyFence, pinned, to_device
+from miniserve.cache.packing import PackedTables
+from miniserve.model.transfer import CopyFence
 
 if TYPE_CHECKING:
     from miniserve.cache.block_table import BlockTable
@@ -173,6 +174,7 @@ class DecodeGraphs:
                 )
                 for g in self.buckets
             }
+        self._packed = PackedTables(dev, rows=gmax, indices=gmax * 64)
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
         self._logits: dict[int, torch.Tensor] = {}
 
@@ -196,11 +198,9 @@ class DecodeGraphs:
     @torch.inference_mode()
     def _capture_all(self) -> None:
         mempool = torch.cuda.graph_pool_handle()
-        dummy = [self.dummy_block]
-        w = self.width
         for g in reversed(self.buckets):  # largest first: smaller graphs reuse its pool memory
             self._stage([], [], [], g)
-            self._plan(g, [dummy] * g, [w] * g)
+            self._plan(g, [])
             # Lazy initialization (cuBLAS handles, kernel selection) must not happen during capture.
             side = _warmup_stream(self.pool.device)
             side.wait_stream(torch.cuda.current_stream(self.pool.device))
@@ -231,17 +231,13 @@ class DecodeGraphs:
         # (non-contiguous), which waits for the device. Rows past g are never read by graph g.
         self._inputs.copy_(s, non_blocking=True)
 
-    def _plan(self, g: int, blocks: Sequence[Sequence[int]], last_lens: Sequence[int]) -> None:
-        indptr = [0]
-        indices: list[int] = []
-        for bl in blocks:
-            indices += bl
-            indptr.append(len(indices))
-        dev = self.pool.device
-        i32 = dict(dtype=torch.int32, device=dev)
+    def _plan(self, g: int, tables: Sequence[BlockTable]) -> None:
+        """Plan bucket ``g`` for ``tables``; rows past them are padding (one dummy page of
+        ``width`` tokens each)."""
+        indptr, indices, last = self._packed.pack(tables, g - len(tables), self.dummy_block, self.width)
         # FlashInfer copies ``indices`` into its buffer non-blocking only from the same device
         # (a host tensor, even pinned, is copied synchronously), so it goes up first.
-        kv = (pinned(indptr, **i32), to_device(indices, torch.int32, dev), pinned(list(last_lens), **i32))
+        kv = (indptr, indices.to(self.pool.device, non_blocking=True), last)
         if self.width == 1:
             self._wrappers[g].plan(*kv, **self._plan_args)
             return
@@ -272,12 +268,7 @@ class DecodeGraphs:
         self._stage(ids, pos, slots, g)
         if fill is not None:
             self._inputs[0].index_copy_(0, *fill)
-        pad = g - b
-        self._plan(
-            g,
-            [t.blocks for t in tables] + [[self.dummy_block]] * pad,
-            [t.last_block_len for t in tables] + [self.width] * pad,
-        )
+        self._plan(g, tables)
         self.fence.mark()
         self._graphs[g].replay()
         return self._logits[g][: b * self.width]

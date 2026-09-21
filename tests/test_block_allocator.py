@@ -291,3 +291,74 @@ def test_random_operations(make, seed):
     for t in tables:
         t.release()
     assert a.num_free == a.num_blocks
+
+
+# --------------------------------------------------------------------------- packing
+
+
+def _naive_pack(tables, pad_rows, pad_block, pad_last):
+    """The layout written out the obvious way, as the reference both backends must match."""
+    indptr, indices = [0], []
+    for t in tables:
+        indices += list(t.blocks)
+        indptr.append(len(indices))
+    for _ in range(pad_rows):
+        indices.append(pad_block)
+        indptr.append(len(indices))
+    return indptr, indices, [t.last_block_len for t in tables] + [pad_last] * pad_rows
+
+
+@pytest.mark.parametrize("pad_rows", [0, 3])
+def test_pack_matches_the_naive_layout(make, pad_rows):
+    import numpy as np
+
+    from miniserve.cache.backend import pack_block_tables
+
+    rng = random.Random(pad_rows)
+    a = make(256, 4)
+    tables = []
+    for n in [1, 4, 5, 17, 0, 33]:
+        t = a.new_table()
+        t.append_tokens(n)
+        tables.append(t)
+    rng.shuffle(tables)
+    want = _naive_pack(tables, pad_rows, 255, 2)
+    indptr, indices, last = (np.full(64, -1, dtype=np.int32) for _ in range(3))
+    n = pack_block_tables(tables, pad_rows, 255, 2, indptr, indices, last)
+    rows = len(tables) + pad_rows
+    assert n == len(want[1])
+    assert indptr[: rows + 1].tolist() == want[0]
+    assert indices[:n].tolist() == want[1]
+    assert last[:rows].tolist() == want[2]
+
+
+def test_pack_refuses_buffers_that_are_too_small(make):
+    import numpy as np
+
+    from miniserve.cache.backend import pack_block_tables
+
+    a = make(16, 4)
+    t = a.new_table()
+    t.append_tokens(12)
+    with pytest.raises(ValueError):
+        pack_block_tables([t], 0, 0, 1, *(np.zeros(2, dtype=np.int32) for _ in range(2)), np.zeros(1, dtype=np.int32))
+
+
+def test_packed_tables_grow_and_reuse_their_buffers(make):
+    import torch
+
+    from miniserve.cache.packing import PackedTables
+
+    a = make(512, 4)
+    p = PackedTables("cpu", rows=2, indices=4)
+    tables = [a.new_table() for _ in range(5)]
+    for i, t in enumerate(tables):
+        t.append_tokens(4 * i + 3)
+    indptr, indices, last = p.pack(tables, pad_rows=1, pad_block=511, pad_last=1)
+    want = _naive_pack(tables, 1, 511, 1)
+    assert (indptr.tolist(), indices.tolist(), last.tolist()) == want
+    assert indptr.dtype == indices.dtype == last.dtype == torch.int32
+    buf = p.indices.data_ptr()
+    small = p.pack(tables[:1])
+    assert p.indices.data_ptr() == buf, "a smaller batch must reuse the buffer"
+    assert (small[0].tolist(), small[1].tolist(), small[2].tolist()) == _naive_pack(tables[:1], 0, 0, 1)

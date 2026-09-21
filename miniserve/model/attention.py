@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 import torch.nn.functional as F
 
+from miniserve.cache.packing import PackedTables
 from miniserve.model.transfer import pinned, to_device
 
 if TYPE_CHECKING:
@@ -100,23 +101,18 @@ class FlashInferPagedAttention:
         )
         self._wrapper = None
         self._slots: torch.Tensor | None = None
+        self._packed = PackedTables(pool.device)
 
     def plan(self, prefill: bool, qo_lens: Sequence[int], tables: Sequence[BlockTable], slots: Sequence[int]) -> None:
         """Describe the next pass: ``qo_lens[b]`` new tokens for sequence ``b``, whose
         table already covers them; ``slots`` are the pool slots of all new tokens in order."""
         if not prefill and any(n != 1 for n in qo_lens):
             raise ValueError("decode passes take one token per sequence")
-        kv_indptr = [0]
-        indices: list[int] = []
-        for t in tables:
-            indices += t.blocks
-            kv_indptr.append(len(indices))
-        # Pinned host tensors and non-blocking copies: planning must not wait for the device.
+        # Pinned host buffers and non-blocking copies: planning must not wait for the device.
+        # The buffers are reused, which the caller's CopyFence makes safe (see packing.py).
         p = self.pool
         i32 = dict(dtype=torch.int32, device=p.device)
-        kv_indptr_t = pinned(kv_indptr, **i32)
-        indices_t = pinned(indices, **i32)
-        last_t = pinned([t.last_block_len for t in tables], **i32)
+        kv_indptr_t, indices_t, last_t = self._packed.pack(tables)
         common = dict(
             num_qo_heads=self.num_heads,
             num_kv_heads=p.num_kv_heads,

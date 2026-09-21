@@ -87,3 +87,27 @@ class BlockTable:
         self.allocator.free(self.blocks)
         self.blocks = []
         self.num_tokens = 0
+
+
+def pack_block_tables(tables, pad_rows: int, pad_block: int, pad_last: int, indptr, indices, last) -> int:
+    """Write ``tables``, then ``pad_rows`` padding rows (each the single page ``pad_block``
+    holding ``pad_last`` tokens), in FlashInfer's paged-KV layout into three int32 arrays
+    (``indptr``: rows + 1 offsets, ``indices``: page ids, ``last``: tokens in each row's last
+    page). Returns the number of page ids written. The C++ backend has the same function."""
+    rows = len(tables) + pad_rows
+    lens = [len(t.blocks) for t in tables]
+    total = sum(lens) + pad_rows
+    if pad_rows < 0:
+        raise ValueError("pad_rows must be >= 0")
+    if len(indptr) < rows + 1 or len(last) < rows or len(indices) < total:
+        raise ValueError(
+            f"packing buffers too small: need {rows + 1} indptr, {total} indices, {rows} last entries"
+        )
+    flat = [b for t in tables for b in t.blocks] + [pad_block] * pad_rows
+    indices[:total] = flat
+    offsets = [0]
+    for n in lens + [1] * pad_rows:
+        offsets.append(offsets[-1] + n)
+    indptr[: rows + 1] = offsets
+    last[:rows] = [t.last_block_len for t in tables] + [pad_last] * pad_rows
+    return total

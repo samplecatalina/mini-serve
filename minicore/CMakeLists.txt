@@ -25,6 +25,7 @@ endif()
 add_library(minicore_core STATIC
   src/block_allocator.cpp
   src/block_table.cpp
+  src/packing.cpp
 )
 target_include_directories(minicore_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(minicore_core PRIVATE -Wall -Wextra)
@@ -66,7 +67,7 @@ if(MINICORE_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   enable_testing()
-  add_executable(minicore_tests tests/test_block_allocator.cpp tests/test_block_table.cpp)
+  add_executable(minicore_tests tests/test_block_allocator.cpp tests/test_block_table.cpp tests/test_packing.cpp)
   target_link_libraries(minicore_tests PRIVATE minicore_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(minicore_tests)

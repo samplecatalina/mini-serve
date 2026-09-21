@@ -26,7 +26,10 @@ from miniserve.cache.block_allocator import OutOfBlocks
 BACKENDS = ("python", "cpp")
 ENV_VAR = "MINISERVE_BLOCK_BACKEND"
 
-__all__ = ["BACKENDS", "ENV_VAR", "OutOfBlocks", "allocator_class", "default_backend"]
+from miniserve.cache.block_table import BlockTable as PythonBlockTable
+from miniserve.cache.block_table import pack_block_tables as _pack_python
+
+__all__ = ["BACKENDS", "ENV_VAR", "OutOfBlocks", "allocator_class", "default_backend", "pack_block_tables"]
 
 
 def default_backend() -> str:
@@ -56,3 +59,14 @@ def allocator_class(backend: str | None = None):
 
         return CppBlockAllocator
     raise ValueError(f"unknown block backend {name!r}, expected one of {BACKENDS}")
+
+
+def pack_block_tables(tables, pad_rows: int, pad_block: int, pad_last: int, indptr, indices, last) -> int:
+    """The batch in FlashInfer's paged-KV layout, written by the backend the tables belong to
+    (see ``block_table.pack_block_tables`` for the contract). For C++ tables this is one call
+    across the binding for the whole batch, instead of one list per table."""
+    if not tables or isinstance(tables[0], PythonBlockTable):
+        return _pack_python(tables, pad_rows, pad_block, pad_last, indptr, indices, last)
+    from miniserve.cache._minicore import pack_block_tables as pack_cpp
+
+    return pack_cpp(tables, pad_rows, pad_block, pad_last, indptr, indices, last)

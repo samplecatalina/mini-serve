@@ -15,9 +15,12 @@
 #include <pybind11/stl.h>
 
 #include <exception>
+#include <string>
+#include <utility>
 
 #include "minicore/block_allocator.hpp"
 #include "minicore/block_table.hpp"
+#include "minicore/packing.hpp"
 
 namespace py = pybind11;
 using minicore::BlockAllocator;
@@ -28,6 +31,16 @@ namespace {
 
 // The Python OutOfBlocks class, resolved once at import.
 py::handle out_of_blocks;
+
+// A writable one-dimensional int32 buffer (a numpy view of a pinned tensor, in practice).
+std::pair<std::int32_t*, std::size_t> int32_buffer(const py::buffer& b, const char* name) {
+  py::buffer_info info = b.request(true);
+  if (info.ndim != 1 || info.itemsize != 4 || (info.format != "i" && info.format != "<i" && info.format != "=i") ||
+      info.strides[0] != 4) {
+    throw std::invalid_argument(std::string(name) + " must be a contiguous one-dimensional int32 buffer");
+  }
+  return {static_cast<std::int32_t*>(info.ptr), static_cast<std::size_t>(info.shape[0])};
+}
 
 }  // namespace
 
@@ -93,6 +106,20 @@ PYBIND11_MODULE(_minicore, m) {
           py::arg("prefix_blocks") = std::vector<BlockId>{}, py::keep_alive<0, 1>(),
           "A block table over this allocator. Callers use this instead of naming a table class, "
           "so that a table always matches the backend of its allocator.");
+
+  m.def(
+      "pack_block_tables",
+      [](const std::vector<const BlockTable*>& tables, int pad_rows, BlockId pad_block, int pad_last,
+         const py::buffer& indptr, const py::buffer& indices, const py::buffer& last) {
+        auto [ip, ipn] = int32_buffer(indptr, "indptr");
+        auto [ix, ixn] = int32_buffer(indices, "indices");
+        auto [la, lan] = int32_buffer(last, "last");
+        return minicore::pack_block_tables(tables, pad_rows, pad_block, pad_last, {ip, ipn, ix, ixn, la, lan});
+      },
+      py::arg("tables"), py::arg("pad_rows"), py::arg("pad_block"), py::arg("pad_last"), py::arg("indptr"),
+      py::arg("indices"), py::arg("last"),
+      "Write a batch of tables (then pad_rows single-page padding rows) in FlashInfer's paged-KV "
+      "layout into three int32 buffers; returns the number of page indices. One crossing per batch.");
 
   m.attr("BACKEND") = "cpp";
 }
