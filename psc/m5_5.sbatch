@@ -39,8 +39,9 @@ cd "$REPO"
 el "node $(hostname), commit $(git rev-parse --short HEAD), image $(sha256sum "$SIF" | cut -c1-16)"
 el "preflight"; bash psc/preflight.sh "$SIF" "$CACHE" "$GPU"
 
-# Nsight Systems runs inside the container, from the host's installation.
-NSYS_BIN=$(command -v nsys || echo "${CUDA_HOME:-/nonexistent}/bin/nsys")
+# Nsight Systems runs inside the container, from the host's installation (not on the
+# compute nodes' PATH; the toolkit's copy resolves its own location, so bind that).
+NSYS_BIN=${NSYS_BIN:-$(command -v nsys || echo /opt/packages/cuda/v13.3.1/bin/nsys)}
 NSYS_ROOT=""
 [ -x "$NSYS_BIN" ] && NSYS_ROOT=$(dirname "$(dirname "$(readlink -f "$NSYS_BIN")")")
 RUN=(apptainer exec --nv --cleanenv --no-home --env HOME=/tmp --env FLASHINFER_CUDA_ARCH_LIST=$ARCH
@@ -57,10 +58,16 @@ step() {  # step <label> <command...>: one failure must not take the rest of the
 }
 
 step "anchor (speculative path)" "${RUN[@]}" python -m pytest -q -p no:cacheprovider tests/test_spec.py
-step "acceptance" "${RUN[@]}" python -m bench.spec_alpha --model 8B --draft 0.6B --gammas 2 4 6 \
-  --kv-pool-tokens 16384 --out m5_5_alpha
+if [ "${SKIP_ALPHA:-0}" != 1 ]; then
+  step "acceptance" "${RUN[@]}" python -m bench.spec_alpha --model 8B --draft 0.6B --gammas 2 4 6 \
+    --kv-pool-tokens 16384 --out m5_5_alpha
+fi
 
-W="--model 8B --workload unique --prefix-len 480 --suffix-len 32 --output-len 128 --kv-pool-tokens $POOL --rounds 2"
+# 512 MiB of FlashInfer scratch: in CUDA Graph mode its size grows with the SM count and the
+# query heads, and an 8B model on this GPU overflows the default 128 MiB at batch 64.
+# Warm-up up to 5 minutes: at these batches prefills hit the power cap and decodes do not.
+W="--model 8B --workload unique --prefix-len 480 --suffix-len 32 --output-len 128 --kv-pool-tokens $POOL --rounds 2
+   --attn-workspace-mb 512 --warmup-max-s 300"
 for n in $SIZES; do
   reqs=$(( n * 4 > 8 ? n * 4 : 8 ))
   S="--max-running $n --cuda-graph-max-bs $n --groups $reqs --per-group 1"

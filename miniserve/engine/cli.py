@@ -51,6 +51,13 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         "graphs are captured for powers of two below it and for it",
     )
     g.add_argument(
+        "--attn-workspace-mb",
+        type=int,
+        default=None,
+        help="FlashInfer scratch buffer in MiB (default 128). Its size in CUDA Graph mode grows with "
+        "the GPU's SM count and the model's query heads: an 8B model on a 142-SM GPU needs more",
+    )
+    g.add_argument(
         "--block-backend",
         choices=BLOCK_BACKENDS,
         default=None,
@@ -87,4 +94,5 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         schedule_policy=args.schedule_policy,
         cuda_graph_max_bs=args.cuda_graph_max_bs,
         block_backend=args.block_backend,
+        attn_workspace_mb=args.attn_workspace_mb,
     )

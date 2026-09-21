@@ -102,6 +102,7 @@ class SpecEngine(Engine):
         schedule_policy: str = "fcfs",
         block_backend: str | None = None,
         block_size: int = 16,
+        attn_workspace_mb: int | None = None,
     ):
         """``draft_model``: the proposing model, same tokenizer, same dtype (it may be the
         target itself, which makes every proposal a correct one and is how the loop is tested).
@@ -134,6 +135,7 @@ class SpecEngine(Engine):
             block_backend=block_backend,
             # A verify pass holds the logits of every verified position, not one row per request.
             sample_rows=max_running * (gamma + 1),
+            attn_workspace_mb=attn_workspace_mb,
         )
         super().__init__(
             None,

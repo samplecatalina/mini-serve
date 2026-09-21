@@ -48,6 +48,7 @@ class ModelRunner:
         cuda_graph_max_bs: int | None = None,
         block_backend: str | None = None,
         sample_rows: int | None = None,
+        attn_workspace_mb: int | None = None,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
@@ -60,7 +61,9 @@ class ModelRunner:
         ``block_backend``: implementation of the block bookkeeping (``python`` or ``cpp``);
         default from ``MINISERVE_BLOCK_BACKEND``.
         ``sample_rows``: rows of logits the profiled peak must hold (default ``max_running``);
-        a verify pass takes the logits of several positions per request."""
+        a verify pass takes the logits of several positions per request.
+        ``attn_workspace_mb``: FlashInfer's scratch buffer, shared by every pass and graph of this
+        runner (default ``FlashInferPagedAttention.WORKSPACE_BYTES``)."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
         self.model = model
@@ -73,6 +76,7 @@ class ModelRunner:
         self.graphs: DecodeGraphs | None = None
         self.use_cuda_graph = False
         self.fence = CopyFence(model.device)
+        self._workspace_bytes = attn_workspace_mb * 1024 * 1024 if attn_workspace_mb else None
         if attention == "paged":
             cfg = model.cfg
 
@@ -128,7 +132,10 @@ class ModelRunner:
         """
         cfg = self.model.cfg
         probe = make_pool(-(-num_tokens // block_size))
-        self.flashinfer = FlashInferPagedAttention(probe, cfg.num_heads, self.model.attn_scale)
+        workspace = None
+        if self._workspace_bytes:
+            workspace = torch.empty(self._workspace_bytes, dtype=torch.uint8, device=self.device)
+        self.flashinfer = FlashInferPagedAttention(probe, cfg.num_heads, self.model.attn_scale, workspace=workspace)
         alloc = allocator_class(self.block_backend)(probe.num_blocks, block_size)
         table = alloc.new_table()
         table.append_tokens(num_tokens)

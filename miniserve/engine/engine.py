@@ -55,6 +55,7 @@ class Engine:
         overlap: bool = True,
         schedule_policy: str = "fcfs",
         block_backend: str | None = None,
+        attn_workspace_mb: int | None = None,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
@@ -65,6 +66,7 @@ class Engine:
         ``overlap``: launch each step before reading back the previous one.
         ``schedule_policy``: admission order and preemption choice (``policy.py``).
         ``block_backend``: implementation of the KV block bookkeeping (``python`` or ``cpp``).
+        ``attn_workspace_mb``: FlashInfer's scratch buffer (default 128 MiB).
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -78,6 +80,7 @@ class Engine:
                 cuda_graph=cuda_graph,
                 cuda_graph_max_bs=cuda_graph_max_bs,
                 block_backend=block_backend,
+                attn_workspace_mb=attn_workspace_mb,
             )
         self.runner = runner
         if chunked_prefill_size is None:
