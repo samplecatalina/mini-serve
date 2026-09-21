@@ -20,6 +20,7 @@ endif
 
 PYTEST_ARGS ?=
 BENCH_ARGS  ?=
+GATE_ARGS   ?=
 # Power scheme that counts as high performance for the benchmark preflight.
 # The development laptop uses a vendor scheme; elsewhere Windows' own
 # "High performance" GUID is the default of bench/host_power.sh.
@@ -37,7 +38,7 @@ NCU_HOST    ?= /opt/nvidia/nsight-compute/2026.2.1
 NCU_OUT     ?= profiling/rtx4060-laptop/decode_sharing
 NCU_ARGS    ?= --metrics gpu__time_duration.sum,dram__bytes_read.sum,lts__t_sector_hit_rate.pct
 
-.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif minicore minicore-test minicore-clean
+.PHONY: help image bench-image lock shell env-check weights test bench charts serve profile gate bench-offline profile-offline bench-roofline bench-decode-sharing ncu-decode-sharing sif minicore minicore-test minicore-clean
 
 help:
 	@echo "image      build the development image ($(IMAGE))"
@@ -48,6 +49,7 @@ help:
 	@echo "weights    download the pinned Qwen3-0.6B snapshot into the cache"
 	@echo "test       run pytest (PYTEST_ARGS='-m \"not slow\"' to skip slow tests; BLOCK_BACKEND=cpp)"
 	@echo "bench-offline    engine-level benchmark (BENCH_ARGS=...; see bench/offline.py)"
+	@echo "gate       the pre-merge throughput check against results/<device>/gate_baseline.json"
 	@echo "profile-offline  the same under Nsight Systems, report in NSYS_OUT"
 	@echo "bench-roofline   this GPU's copy bandwidth and BF16 GEMM rate: the denominators"
 	@echo "charts     draw the ablation figures from the result rows (CHART_DEVICE=l40s)"
@@ -106,6 +108,13 @@ bench-offline:
 	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
 		$(IMAGE) python -m bench.offline $(BENCH_ARGS)
+
+# The check a change has to clear before it is merged: a short benchmark on this
+# GPU against a recorded baseline. GATE_ARGS='--update' records a new one.
+gate:
+	$(DOCKER_RUN) -e PYTHONPATH=/workspace \
+		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		$(IMAGE) python -m bench.gate $(GATE_ARGS)
 
 profile-offline:
 	mkdir -p $(dir $(NSYS_OUT))
