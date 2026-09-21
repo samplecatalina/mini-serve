@@ -224,9 +224,12 @@ class SpecEngine(Engine):
                 self.draft.prefill(r.rid, r.token_slice(0, r.seq_len - 1))
 
     def _round(self, batch: Batch) -> None:
+        # The NVTX ranges below let a profiler split a round into its parts (host and device).
+        nvtx = torch.cuda.nvtx
         reqs = batch.requests
         g, width, b = self._gamma, self._gamma + 1, len(batch.requests)
-        self._draft_prefill(reqs)
+        with nvtx.range("draft_prefill"):
+            self._draft_prefill(reqs)
         for r in reqs:
             if r.cache.num_tokens != r.seq_len - 1:
                 raise RuntimeError(f"request {r.rid}: {r.cache.num_tokens} cached tokens, sequence is {r.seq_len}")
@@ -236,27 +239,31 @@ class SpecEngine(Engine):
         # more after steps that ran without speculation.
         starts = [self.draft.covered(r.rid) for r in reqs]
         pending = [r.token_slice(s, r.seq_len - s) for r, s in zip(reqs, starts)]
-        proposals = self.draft.propose([r.rid for r in reqs], pending, starts, g)
+        with nvtx.range("propose"):
+            proposals = self.draft.propose([r.rid for r in reqs], pending, starts, g)
 
         # 2. verify, in one pass over gamma + 1 positions per request. The proposals stay on
         # the device; only their positions in the token ids are known here.
-        tables = [r.cache for r in reqs]
-        self.runner.reserve(tables, [width] * b)
-        ids: list[int] = []
-        pos: list[int] = []
-        for r in reqs:
-            ids += [r.output_ids[-1], *([0] * g)]
-            pos += range(r.seq_len - 1, r.seq_len - 1 + width)
-        logits = self.runner.forward_tokens(
-            tables, ids, pos, [width] * b, fill=(self._proposal_rows(b, g), proposals.reshape(-1))
-        )
-        chosen = logits.argmax(dim=-1).view(b, width)
+        with nvtx.range("verify"):
+            tables = [r.cache for r in reqs]
+            self.runner.reserve(tables, [width] * b)
+            ids: list[int] = []
+            pos: list[int] = []
+            for r in reqs:
+                ids += [r.output_ids[-1], *([0] * g)]
+                pos += range(r.seq_len - 1, r.seq_len - 1 + width)
+            logits = self.runner.forward_tokens(
+                tables, ids, pos, [width] * b, fill=(self._proposal_rows(b, g), proposals.reshape(-1))
+            )
+            chosen = logits.argmax(dim=-1).view(b, width)
 
         # 3. read both back in one copy and settle each request on the host.
-        verdict = torch.cat((proposals, chosen), dim=1).tolist()
-        self.spec_stats["rounds"] += 1
-        for r, row in zip(reqs, verdict):
-            self._settle(r, row[:g], row[g:])
+        with nvtx.range("readback"):
+            verdict = torch.cat((proposals, chosen), dim=1).tolist()
+        with nvtx.range("settle"):
+            self.spec_stats["rounds"] += 1
+            for r, row in zip(reqs, verdict):
+                self._settle(r, row[:g], row[g:])
 
     def _settle(self, req: Request, proposals: list[int], chosen: list[int]) -> None:
         """Append what this round produced for one request, and give back the rest of its KV."""

@@ -123,13 +123,15 @@ class DraftRunner:
         a step that ran without speculation.
         """
         tables = [self.tables[r] for r in rids]
-        logits = self._extend(tables, pending, starts)
-        pos = [s + len(p) for s, p in zip(starts, pending)]
-        proposals = [logits.argmax(dim=-1)]
-        for _ in range(gamma - 1):
-            logits = self._decode(tables, proposals[-1], pos)
-            proposals.append(logits.argmax(dim=-1))
-            pos = [p + 1 for p in pos]
+        with torch.cuda.nvtx.range("draft_extend"):
+            logits = self._extend(tables, pending, starts)
+            pos = [s + len(p) for s, p in zip(starts, pending)]
+            proposals = [logits.argmax(dim=-1)]
+        with torch.cuda.nvtx.range("draft_decode"):
+            for _ in range(gamma - 1):
+                logits = self._decode(tables, proposals[-1], pos)
+                proposals.append(logits.argmax(dim=-1))
+                pos = [p + 1 for p in pos]
         return torch.stack(proposals, dim=1)
 
     def _extend(self, tables: list[BlockTable], ids: Sequence[Sequence[int]], starts: Sequence[int]) -> torch.Tensor:
