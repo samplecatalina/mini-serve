@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import glob
 import json
 import os
 import statistics
@@ -48,18 +49,38 @@ from bench import sidecar
 # this project refers to this commit.
 BLUEPRINT_COMMIT = "9a91cfafe754aa85daee49998176275667eb58f2"
 
-# Settings that decide the result and that both engines expose. The value is
-# what is asked of each side; the table records what each side reported back.
-ALIGNED = ("kv_pool_tokens", "max_running", "cuda_graph_max_bs", "max_prefill_tokens",
-           "prefix_cache", "attention_backend", "dtype", "model", "sampling")
+# The settings that decide the result and that both engines expose, in one
+# place because a comparison whose two sides are configured on two command
+# lines is a comparison that will one day be run with them out of step. The
+# first run of this was: 64 running requests on one side against 256 on the
+# other, and a 4096-token-per-step prefill budget against 8192. Most of what
+# it appeared to measure was those two numbers.
+#
+# ``dump`` prints these as this engine's own flags, so the two arms cannot
+# drift apart without the file that generated the requests changing too.
+ALIGNED = {
+    "kv_pool_tokens": 32768,   # matched on tokens: the two page the pool differently
+    "max_running": 256,        # the cap on the running batch
+    "cuda_graph_max_bs": 256,  # the largest decode batch either captures a graph for
+    "prefill_budget": 8192,    # tokens in one forward pass, prefill chunks included
+}
+
+MINISERVE_FLAGS = [
+    "--kv-pool-tokens", str(ALIGNED["kv_pool_tokens"]),
+    "--max-running", str(ALIGNED["max_running"]),
+    "--cuda-graph-max-bs", str(ALIGNED["cuda_graph_max_bs"]),
+    "--chunked-prefill-size", str(ALIGNED["prefill_budget"]),
+]
 
 # Differences that exist and cannot be removed by a flag.
 UNALIGNABLE = {
     "kv_paging": "16 tokens per block here, 1 token per page in the blueprint: "
                  "the pool is matched on tokens, not on blocks",
+    "flashinfer": "the blueprint's own image does not pin it, so it resolves to "
+                  "whatever is current; the version each side ran is in its sidecar",
     "scheduler_process_model": "one process with an engine thread here, "
                                "separate scheduler/tokenizer/detokenizer processes over ZMQ there "
-                               "(bypassed in both by using each engine's in-process offline path)",
+                               "(both bypassed by using each engine's in-process offline path)",
 }
 
 
@@ -101,11 +122,15 @@ def dump(argv: list[str]) -> int:
         "model_path": str(model_path(spec_for(a.model), download=False)),
         "prompts": w.prompts, "output_lens": w.output_lens,
         "warm_prompts": warm.prompts, "warm_output_lens": warm.output_lens,
+        "aligned": ALIGNED, "miniserve_args": MINISERVE_FLAGS,
     }
     with open(a.out, "w") as f:
         json.dump(rec, f)
     print(f"{len(w.prompts)} requests, {sum(map(len, w.prompts))} prompt tokens, "
           f"{sum(w.output_lens)} output tokens -> {a.out}")
+    # The other arm's flags, so that both sides are configured from this file
+    # rather than from two command lines that have to be kept in step by hand.
+    print("miniserve-args: " + " ".join(MINISERVE_FLAGS))
     return 0
 
 
@@ -121,10 +146,10 @@ def run(argv: list[str]) -> int:
     ap.add_argument("--workload", required=True, help="the file written by `dump`")
     ap.add_argument("--out", required=True, help="results/<device>/<out>_blueprint.csv")
     ap.add_argument("--rounds", type=int, default=3)
-    ap.add_argument("--kv-pool-tokens", type=int, default=32768)
-    ap.add_argument("--max-running", type=int, default=256)
-    ap.add_argument("--cuda-graph-max-bs", type=int, default=256)
-    ap.add_argument("--max-prefill-tokens", type=int, default=8192)
+    ap.add_argument("--kv-pool-tokens", type=int, default=ALIGNED["kv_pool_tokens"])
+    ap.add_argument("--max-running", type=int, default=ALIGNED["max_running"])
+    ap.add_argument("--cuda-graph-max-bs", type=int, default=ALIGNED["cuda_graph_max_bs"])
+    ap.add_argument("--max-prefill-tokens", type=int, default=ALIGNED["prefill_budget"])
     ap.add_argument("--attention-backend", default="fi")
     ap.add_argument("--warmup-min-s", type=float, default=10.0)
     ap.add_argument("--warmup-max-s", type=float, default=90.0)
@@ -190,6 +215,20 @@ def run(argv: list[str]) -> int:
             output_tok_s=round(sum(output_lens) / span, 1), span_s=round(span, 3),
         )
 
+    eff = engine_readback(llm, a)
+    drift = {k: (eff[k], ALIGNED[k]) for k in ("kv_pool_tokens", "max_running")
+             if eff[k] != ALIGNED[k]}
+    if eff["max_prefill_tokens"] != ALIGNED["prefill_budget"]:
+        drift["prefill_budget"] = (eff["max_prefill_tokens"], ALIGNED["prefill_budget"])
+    if max(eff["cuda_graph_bs"], default=0) != ALIGNED["cuda_graph_max_bs"]:
+        drift["cuda_graph_max_bs"] = (max(eff["cuda_graph_bs"], default=0), ALIGNED["cuda_graph_max_bs"])
+    if drift:
+        # The point of reading the settings back is to act on them. An arm that
+        # ran with something other than what the comparison aligned on is not a
+        # slower or faster engine, it is a different measurement.
+        raise SystemExit("the blueprint did not run with the aligned settings "
+                         f"(effective, aligned): {drift}")
+
     env = sidecar.environment()
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     with sidecar.GpuSampler() as gpu:
@@ -232,8 +271,7 @@ def run(argv: list[str]) -> int:
         wr.writerows(rows)
     sidecar.write_sidecar(f"{results_dir}/{a.out}_blueprint.{run_id}.sidecar.json", dict(
         run_id=run_id,
-        config=dict(vars(a), blueprint_commit=BLUEPRINT_COMMIT, caliber=wl["caliber"],
-                    engine=engine_readback(llm, a)),
+        config=dict(vars(a), blueprint_commit=BLUEPRINT_COMMIT, caliber=wl["caliber"], engine=eff),
         environment=dict(env, minisgl=BLUEPRINT_COMMIT[:12]),
         preflight=pre, warmup=warmup, gpu_during_runs=per_run_gpu,
     ))
@@ -285,29 +323,58 @@ def table(argv: list[str]) -> int:
     a = ap.parse_args(argv)
     results_dir = a.results_dir or sidecar.device_profile()[1].results_dir
 
-    def med(path: str, key: str) -> float:
+    def rows_of(path: str) -> list[dict]:
         with open(path, newline="") as f:
-            vals = [float(r[key]) for r in csv.DictReader(f) if r[key] not in ("", None)]
+            return list(csv.DictReader(f))
+
+    def med(rows: list[dict], key: str) -> float:
+        vals = [float(r[key]) for r in rows if r.get(key) not in ("", None)]
         if not vals:
-            raise SystemExit(f"{path}: no {key}")
+            raise SystemExit(f"no {key}")
         return statistics.median(vals)
 
-    ours = f"{results_dir}/{a.out}.csv"
-    theirs = f"{results_dir}/{a.out}_blueprint.csv"
+    ours, theirs = rows_of(f"{results_dir}/{a.out}.csv"), rows_of(f"{results_dir}/{a.out}_blueprint.csv")
     keys = ("output_tok_s", "ttft_p50_ms", "ttft_p95_ms", "itl_p50_ms", "itl_p99_ms", "e2e_mean_ms")
-    rows = []
+    table_rows = []
     for key in keys:
         mine, other = med(ours, key), med(theirs, key)
-        rows.append(dict(metric=key, miniserve=round(mine, 2), minisgl=round(other, 2),
-                         ratio=round(mine / other, 4) if other else ""))
+        table_rows.append(dict(metric=key, miniserve=round(mine, 2), minisgl=round(other, 2),
+                               ratio=round(mine / other, 4) if other else ""))
     out = f"{results_dir}/{a.out}_compare.csv"
     with open(out, "w", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=list(rows[0]))
+        wr = csv.DictWriter(f, fieldnames=list(table_rows[0]))
         wr.writeheader()
-        wr.writerows(rows)
-    for r in rows:
+        wr.writerows(table_rows)
+    for r in table_rows:
         print(f"{r['metric']:<16} {r['miniserve']:>10} {r['minisgl']:>10}  {r['ratio']}")
+
+    # The fairness record, collected from what each side reported rather than
+    # written out by hand. The effective prefill budget is the one the run used,
+    # which neither side's flags show: each writes it into its own rows.
+    def side(path_glob: str, rows: list[dict]) -> dict:
+        newest = sorted(glob.glob(path_glob))[-1]
+        with open(newest) as f:
+            sc = json.load(f)
+        return {"sidecar": os.path.basename(newest), "engine": sc["config"]["engine"],
+                "runtime": sc["environment"],
+                "prefill_budget_effective": rows[0].get("chunked_prefill_size")
+                or sc["config"]["engine"].get("max_prefill_tokens"),
+                "runs": len(rows), "run_ids": sorted({r["run_id"] for r in rows})}
+
+    record = {
+        "aligned_on": ALIGNED,
+        "not_alignable": UNALIGNABLE,
+        "blueprint_commit": BLUEPRINT_COMMIT,
+        "workload": {k: ours[0][k] for k in ("workload", "requests", "prompt_tokens", "output_tokens")},
+        "miniserve": side(f"{results_dir}/{a.out}.*.sidecar.json", ours),
+        "minisgl": side(f"{results_dir}/{a.out}_blueprint.*.sidecar.json", theirs),
+    }
+    fair = f"{results_dir}/{a.out}_fairness.json"
+    with open(fair, "w") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
     print(out)
+    print(fair)
     return 0
 
 
