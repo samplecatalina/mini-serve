@@ -133,7 +133,6 @@ def run(argv: list[str]) -> int:
 
     pre = sidecar.preflight()  # before anything reaches the GPU
     results_dir = a.results_dir or sidecar.device_profile()[1].results_dir
-    env = sidecar.environment()
     with open(a.workload) as f:
         wl = json.load(f)
 
@@ -155,6 +154,10 @@ def run(argv: list[str]) -> int:
                 self.token_times[msg.uid].append(t)
             super().offline_send_result(reply)
 
+    # The blueprint's engine asserts that nothing has touched CUDA yet, so the
+    # software description -- which imports flashinfer, and so initialises it --
+    # is collected after the engine exists rather than before. The preflight
+    # above reads nvidia-smi only, and still runs first.
     llm = Timed(
         wl["model_path"],
         dtype=torch.bfloat16,
@@ -187,6 +190,7 @@ def run(argv: list[str]) -> int:
             output_tok_s=round(sum(output_lens) / span, 1), span_s=round(span, 3),
         )
 
+    env = sidecar.environment()
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     with sidecar.GpuSampler() as gpu:
         t_warm = time.monotonic()
