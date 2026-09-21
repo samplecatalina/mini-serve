@@ -242,23 +242,29 @@ def run(argv: list[str]) -> int:
 
 
 def engine_readback(llm, a) -> dict:
-    """What the blueprint actually ended up running, read off the engine rather than the flags.
+    """What the blueprint actually ended up running, read off the engine objects.
 
-    Several of these are chosen inside the engine and a command line does not
-    show them; a comparison that quotes the flags instead of the effective
-    values is quoting an intention.
+    Several of these are decided inside the engine, and one of them is decided
+    against the free memory it finds: the blueprint adjusts its own config
+    before building anything, so the flags are an intention and only the
+    objects say what happened. A comparison that quotes the flags is quoting
+    the intention.
     """
-    cfg = llm.config
+    eng = llm.engine
+    cache = llm.cache_manager
     return {
-        "kv_pool_tokens": getattr(llm.context.kv_cache, "num_pages", None) or a.kv_pool_tokens,
-        "page_size": cfg.page_size,
-        "max_running": cfg.max_running_req,
-        "max_prefill_tokens": cfg.max_extend_tokens,
-        "cuda_graph_max_bs": cfg.cuda_graph_max_bs,
-        "attention_backend": cfg.attention_backend,
-        "cache_type": cfg.cache_type,
-        "dtype": str(cfg.dtype),
-        "model_path": cfg.model_path,
+        "kv_pool_tokens": eng.num_pages * cache.page_size,
+        "num_pages": eng.num_pages,
+        "page_size": cache.page_size,
+        "max_running": llm.table_manager.page_table.shape[0] - 1,  # one row is the dummy request
+        "max_prefill_tokens": llm.prefill_budget,
+        "cuda_graph_bs": eng.graph_runner.graph_bs_list,
+        "max_seq_len": eng.max_seq_len,
+        "attention_backend": type(eng.attn_backend).__name__,
+        "prefix_cache": type(cache.prefix_cache).__name__,
+        "dtype": str(eng.dtype),
+        "model_path": a.__dict__.get("model_path") or llm.tokenizer.name_or_path,
+        "asked": {k: v for k, v in vars(a).items() if k != "results_dir"},
     }
 
 
