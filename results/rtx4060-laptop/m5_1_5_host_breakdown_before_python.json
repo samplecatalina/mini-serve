@@ -1,0 +1,41 @@
+{
+  "32": {
+    "schedule": 0.020134999431320466,
+    "ids_pos": 0.007192000339273363,
+    "reserve": 0.016795500414445996,
+    "slots": 0.00729100065655075,
+    "graph_stage": 0.03509699945425382,
+    "plan_pack": 0.008501499905833043,
+    "plan_to_device": 0.15162050112849101,
+    "flashinfer_plan": 0.130167499264644,
+    "launch_bookkeeping": 0.010175999705097638,
+    "process_writeback": 0.010472500434843823,
+    "blocks_per_request": 84
+  },
+  "128": {
+    "schedule": 0.06820300040999427,
+    "ids_pos": 0.02406250041531166,
+    "reserve": 0.06082899926695973,
+    "slots": 0.026485499802220147,
+    "graph_stage": 0.05445399983727839,
+    "plan_pack": 0.029830999665136915,
+    "plan_to_device": 0.4833624989259988,
+    "flashinfer_plan": 0.2682904996618163,
+    "launch_bookkeeping": 0.029503000405384228,
+    "process_writeback": 0.035434499295661226,
+    "blocks_per_request": 84
+  },
+  "248": {
+    "schedule": 0.12254699959157733,
+    "ids_pos": 0.04396399981487775,
+    "reserve": 0.1161204991149134,
+    "slots": 0.05019749914936256,
+    "graph_stage": 0.07419099983962951,
+    "plan_pack": 0.05594300000666408,
+    "plan_to_device": 0.8902489998945384,
+    "flashinfer_plan": 0.4552330010483274,
+    "launch_bookkeeping": 0.04896800055576023,
+    "process_writeback": 0.06528650010295678,
+    "blocks_per_request": 84
+  }
+}
