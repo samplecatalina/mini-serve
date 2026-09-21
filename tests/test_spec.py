@@ -422,10 +422,18 @@ def test_the_drafts_graphs_propose_what_eager_proposes(qwen3):
 @pytest.mark.parametrize("gamma", [1, 4])
 @pytest.mark.parametrize("lens", [[40], [5, 900, 2500], [300, 7, 1200, 64, 2000, 33]])
 def test_a_verify_graph_matches_the_eager_pass(qwen3, gamma, lens):
-    """A verify pass replayed from a graph of width gamma + 1 against the same pass run eagerly:
-    every position's logits within the tolerance, and the padding rows write nothing but the
-    dummy block. The graphs were captured over sequences as short as the width, so this also
-    checks that planning long sequences updates what the replay reads."""
+    """A verify pass replayed from a graph of width gamma + 1, the same pass run eagerly, and the
+    reference path over the whole sequence: neither kernel path may pick another token than the
+    reference where the reference's top-2 gap exceeds the tolerance (the anchor's rule), and the
+    padding rows write nothing but the dummy block. The graphs were captured over sequences as
+    short as the width, so this also checks that planning long sequences updates what the
+    replay reads.
+
+    The largest logit difference between the two kernel paths is printed, not bounded: they
+    split the KV differently (the graph's grid is fixed at capture), and how far apart that
+    puts them depends on the GPU (its SM count decides how the KV is split), so a bound that
+    holds on one device fails on another. What is bounded is what the anchor bounds: the
+    choice of token."""
     import random
 
     from anchor import EPS
@@ -453,12 +461,27 @@ def test_a_verify_graph_matches_the_eager_pass(qwen3, gamma, lens):
         t.rewind(width)
     runner.reserve(tables, [width] * len(lens))
     eager_logits = runner.forward_tokens(tables, ids, pos, [width] * len(lens)).float()
-    diff = (graph_logits - eager_logits).abs().max().item()
-    top2 = eager_logits.topk(2, dim=-1).values
-    decisive = (top2[:, 0] - top2[:, 1]) > 2 * diff
-    print(f"\n[{len(lens)} rows, width {width}] verify graph vs eager max|d| {diff}")
-    assert diff <= EPS
-    assert torch.equal(graph_logits.argmax(-1)[decisive], eager_logits.argmax(-1)[decisive])
+    ref = []
+    start = 0
+    for i, n in enumerate(lens):
+        seq = prompt_ids[start : start + n] + ids[i * width : (i + 1) * width]
+        start += n
+        dev = qwen3.device
+        out = qwen3.forward(
+            torch.tensor(seq, device=dev), torch.arange(n + width, device=dev), qwen3.new_cache(n + width), all_logits=True
+        )
+        ref.append(out[-width:].float())
+    ref = torch.cat(ref)
+    top2 = ref.topk(2, dim=-1).values
+    decisive = (top2[:, 0] - top2[:, 1]) > EPS
+    d = {k: (v - ref).abs().max().item() for k, v in (("graph", graph_logits), ("eager", eager_logits))}
+    between = (graph_logits - eager_logits).abs().max().item()
+    print(
+        f"\n[{len(lens)} rows, width {width}] max|d| graph-eager {between}, graph-ref {d['graph']}, "
+        f"eager-ref {d['eager']}; decisive {int(decisive.sum())}/{len(decisive)}"
+    )
+    for name, logits in (("graph", graph_logits), ("eager", eager_logits)):
+        assert torch.equal(logits.argmax(-1)[decisive], ref.argmax(-1)[decisive]), f"{name} path picked another token"
     for t in tables:
         t.release()
 
@@ -489,9 +512,12 @@ def test_the_drafts_first_step_graph_matches_eager(qwen3):
             t.rewind(2)
     assert draft.first_graphs is not None
     diff = (out[True] - out[False]).abs().max().item()
+    top2 = out[False].topk(2, dim=-1).values
+    decisive = (top2[:, 0] - top2[:, 1]) > 2 * diff
     print(f"\n[{len(lens)} rows, width 2] draft first-step graph vs eager max|d| {diff}")
     assert diff <= EPS
-    assert torch.equal(out[True].argmax(-1), out[False].argmax(-1))
+    # Only where the eager path is not within reach of a tie: an exact tie may break either way.
+    assert torch.equal(out[True].argmax(-1)[decisive], out[False].argmax(-1)[decisive])
 
 
 @pytest.mark.gpu
