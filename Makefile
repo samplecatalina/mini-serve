@@ -135,6 +135,7 @@ blueprint-cache:
 bench-blueprint: blueprint-cache
 	$(BLUEPRINT_RUN) \
 		-e MINISERVE_HOST_POWER='$(shell HIGH_PERF_SCHEME=$(HIGH_PERF_SCHEME) bench/host_power.sh)' \
+		-e MINISERVE_GIT='{"commit": "$(shell git rev-parse HEAD)", "dirty": $(shell test -n "$$(git status --porcelain --untracked-files=no)" && echo true || echo false)}' \
 		$(BLUEPRINT_IMAGE) -m bench.blueprint $(BENCH_ARGS)
 
 gate:

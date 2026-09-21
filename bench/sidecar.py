@@ -216,18 +216,39 @@ class GpuSampler:
         )
 
 
+def harness_commit() -> tuple[str, bool]:
+    """Which commit of this harness is running, and whether it was modified.
+
+    Normally git answers. The blueprint's own image, which runs this harness
+    for the second baseline, does not carry git, so its launcher passes the
+    answer in as ``MINISERVE_GIT``. An image with neither would write results
+    that cannot be traced back to code, so it does not get to start.
+    """
+
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    try:
+        return git("rev-parse", "HEAD"), bool(git("status", "--porcelain", "--untracked-files=no"))
+    except FileNotFoundError:
+        raw = os.environ.get("MINISERVE_GIT")
+        if not raw:
+            raise PreflightError("no git in this image and no MINISERVE_GIT: "
+                                 "the commit that produced the run cannot be recorded")
+        g = json.loads(raw)
+        return g["commit"], bool(g["dirty"])
+
+
 def environment() -> dict:
     """Software and host description for the sidecar."""
     import flashinfer
     import torch
 
-    def git(*args):
-        return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
-
+    commit, dirty = harness_commit()
     cpu = next((l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), "unknown")
     return dict(
-        git_commit=git("rev-parse", "HEAD"),
-        git_dirty=bool(git("status", "--porcelain", "--untracked-files=no")),
+        git_commit=commit,
+        git_dirty=dirty,
         python=platform.python_version(),
         torch=torch.__version__,
         cuda=torch.version.cuda,

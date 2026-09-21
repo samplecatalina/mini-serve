@@ -201,3 +201,25 @@ class TestEngineCounters:
 
     def test_a_window_with_no_decode_step_does_not_divide_by_zero(self):
         assert serving.stats_delta(self.snapshot(), self.snapshot(steps=3, prefill_steps=3))["running_batch_mean"] == 0.0
+
+
+def test_the_commit_can_come_from_the_launcher_but_not_from_nowhere(monkeypatch):
+    """The blueprint's image has no git; it is told which harness commit it runs.
+
+    The point of the fallback is that it is a fallback: an image with neither
+    git nor the environment variable would write results that cannot be traced
+    back to code, so it does not get to start.
+    """
+    from bench import sidecar
+
+    def no_git(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(sidecar.subprocess, "run", no_git)
+
+    monkeypatch.delenv("MINISERVE_GIT", raising=False)
+    with pytest.raises(sidecar.PreflightError):
+        sidecar.harness_commit()
+
+    monkeypatch.setenv("MINISERVE_GIT", json.dumps({"commit": "0" * 40, "dirty": False}))
+    assert sidecar.harness_commit() == ("0" * 40, False)
