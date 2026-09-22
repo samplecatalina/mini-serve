@@ -1,0 +1,44 @@
+{
+ "num_blocks": 20964,
+ "shapes": {
+  "unique": {
+   "nodes": 308,
+   "leaves": 308,
+   "cached_blocks": 20944,
+   "build_s": 0.1,
+   "prefix_len_us": 18.48,
+   "match_us": 19.36,
+   "match_lock_unlock_us": 19.86,
+   "evict_1_us": 68.41,
+   "insert_us": 20.96
+  },
+  "chat": {
+   "nodes": 4793,
+   "leaves": 1498,
+   "cached_blocks": 20964,
+   "build_s": 0.29,
+   "prefix_len_us": 11.33,
+   "match_us": 12.2,
+   "match_lock_unlock_us": 13.46,
+   "evict_1_us": 670.9,
+   "insert_us": 20.2
+  },
+  "fine": {
+   "nodes": 19172,
+   "leaves": 18916,
+   "cached_blocks": 20964,
+   "build_s": 0.33,
+   "prefix_len_us": 2.4,
+   "match_us": 3.01,
+   "match_lock_unlock_us": 3.4,
+   "evict_1_us": 4895.78,
+   "insert_us": 7.03
+  }
+ },
+ "git_commit": "ef1f7b963e708e7c405319a1695e0361fbcba9f6",
+ "argv": [
+  "scale",
+  "--out",
+  "results/rtx4060-laptop/m5_2_radix_host_scale.json"
+ ]
+}
