@@ -153,6 +153,9 @@ def run(argv: list[str]) -> int:
     ap.add_argument("--attention-backend", default="fi")
     ap.add_argument("--warmup-min-s", type=float, default=10.0)
     ap.add_argument("--warmup-max-s", type=float, default=90.0)
+    ap.add_argument("--clear-cache-each-run", action="store_true",
+                    help="empty the blueprint's prefix cache before every timed run, as bench/offline.py does "
+                         "on its side; without it a repeated workload rewards the side that keeps prefixes")
     ap.add_argument("--results-dir", default=None)
     a = ap.parse_args(argv)
 
@@ -247,6 +250,8 @@ def run(argv: list[str]) -> int:
 
         rows, per_run_gpu = [], []
         for k in range(a.rounds):
+            if a.clear_cache_each_run:
+                clear_prefix_cache(llm)
             t_start = gpu.sample_now()
             r = once(wl["prompts"], wl["output_lens"])
             gpu_run = gpu.summary(since=t_start, until=gpu.sample_now())
@@ -277,6 +282,29 @@ def run(argv: list[str]) -> int:
     ))
     print(f"{csv_path}")
     return 0
+
+
+def clear_prefix_cache(llm) -> None:
+    """Return every page the blueprint's prefix cache holds to its free list, between runs.
+
+    Its prefix cache has no reset (``RadixPrefixCache.reset`` raises
+    NotImplementedError), so this takes the path the blueprint itself takes when
+    an allocation is short (``CacheManager._allocate``): evict, then append the
+    evicted pages to the free slots. Nothing is running between runs, so
+    everything cached is evictable, and the blueprint's own integrity check
+    confirms the pool adds up afterwards.
+    """
+    import torch
+
+    cm = llm.cache_manager
+    n = cm.prefix_cache.size_info.evictable_size
+    if n:
+        evicted = cm.prefix_cache.evict(n)
+        cm.free_slots = torch.cat([cm.free_slots, evicted[:: cm.page_size]])
+    cm.check_integrity()
+    if cm.prefix_cache.size_info.evictable_size or len(cm.free_slots) != cm.num_pages:
+        raise SystemExit("the blueprint's prefix cache did not empty: "
+                         f"{cm.prefix_cache.size_info}, {len(cm.free_slots)} of {cm.num_pages} pages free")
 
 
 def engine_readback(llm, a) -> dict:
