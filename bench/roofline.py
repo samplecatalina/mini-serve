@@ -1,4 +1,4 @@
-"""The denominators: this GPU's achievable copy bandwidth and BF16 GEMM rate.
+"""The denominators: this GPU's achievable copy and read bandwidth and BF16 GEMM rate.
 
 Every "percent of peak" in this repository divides by a number measured here,
 not by a vendor specification. Two quantities are enough for the engine:
@@ -8,6 +8,12 @@ not by a vendor specification. Two quantities are enough for the engine:
   time has a floor of (bytes per step) / (bandwidth this GPU actually reaches).
   A device-to-device copy is the closest cheap proxy: it streams two large
   buffers with no reuse, which is what the weight and KV reads do.
+- **read bandwidth**: the same buffers read once and summed into one number,
+  nothing written back. A decode step is almost all reads (weights and KV),
+  and on some GPUs a copy's write half costs more than its share, so the copy
+  figure understates what a read-only stream reaches. Both are kept: the copy
+  as the conservative floor every published number so far used, the read as
+  the tighter one.
 - **BF16 GEMM rate**, because prefill is compute bound. It sets the floor under
   time to first token.
 
@@ -89,6 +95,19 @@ def copy_case(mib: int, iters: int) -> tuple[dict, Callable[[], None]]:
     return dict(kernel="copy", dtype="bfloat16", size=f"{mib}MiB", bytes=moved, flops=0, iters=iters), run
 
 
+def read_case(mib: int, iters: int) -> tuple[dict, Callable[[], None]]:
+    """A sum over ``mib`` MiB into one FP32 value: it reads that much and writes nothing."""
+    n = mib * 1024 * 1024 // 2  # bfloat16 elements
+    src = torch.randn(n, dtype=torch.bfloat16, device="cuda")
+    acc = torch.empty((), dtype=torch.float32, device="cuda")
+    moved = src.numel() * src.element_size()
+
+    def run():
+        torch.sum(src, dim=0, dtype=torch.float32, out=acc)
+
+    return dict(kernel="read", dtype="bfloat16", size=f"{mib}MiB", bytes=moved, flops=0, iters=iters), run
+
+
 def gemm_case(n: int, iters: int) -> tuple[dict, Callable[[], None]]:
     """A square BF16 matmul, large enough to be tensor-core bound."""
     a = torch.randn(n, n, dtype=torch.bfloat16, device="cuda")
@@ -147,14 +166,17 @@ def main() -> int:
         del heat
         for mib in COPY_MIB:
             rows.append(measure(gpu, copy_case(mib, args.iters), args.settle_iters))
+        for mib in COPY_MIB:
+            rows.append(measure(gpu, read_case(mib, args.iters), args.settle_iters))
         for n in GEMM_N:
             rows.append(measure(gpu, gemm_case(n, args.iters), args.settle_iters))
         gpu_during = gpu.summary()
 
     spec = SPEC_MEM_GB_S.get(name)
     for row in rows:
-        row["spec_mem_gb_s"] = spec if row["kernel"] == "copy" else ""
-        row["pct_of_spec"] = round(100 * row["gb_s"] / spec, 1) if row["kernel"] == "copy" and spec else ""
+        streams = row["kernel"] in ("copy", "read")
+        row["spec_mem_gb_s"] = spec if streams else ""
+        row["pct_of_spec"] = round(100 * row["gb_s"] / spec, 1) if streams and spec else ""
         row["run_id"] = run_id
         row["device"] = name
         row["git_commit"] = env["git_commit"][:12]
@@ -166,6 +188,7 @@ def main() -> int:
     # is the L2's contribution, and it is worth seeing.
     copies = [r for r in rows if r["kernel"] == "copy"]
     best_copy = max(copies, key=lambda r: r["bytes"])
+    best_read = max((r for r in rows if r["kernel"] == "read"), key=lambda r: r["bytes"])
     # The same rule for the GEMM rate, for the same reason and one more: on a
     # power-limited card the largest problem is the one that runs long enough to
     # hit the cap. The fastest size is reported beside it, because the gap between
@@ -192,7 +215,7 @@ def main() -> int:
         f"{results_dir}/{args.out}.{run_id}.sidecar.json",
         dict(
             run_id=run_id,
-            config=vars(args) | dict(copy_mib=list(COPY_MIB), gemm_n=list(GEMM_N)),
+            config=vars(args) | dict(copy_mib=list(COPY_MIB), read_mib=list(COPY_MIB), gemm_n=list(GEMM_N)),
             environment=env,
             preflight=pre,
             warmup=window,
@@ -200,6 +223,7 @@ def main() -> int:
             per_case_gpu={r["kernel"] + "/" + r["size"]: r["_window"] for r in rows},
             best=dict(
                 copy_gb_s=best_copy["gb_s"], copy_size=best_copy["size"],
+                read_gb_s=best_read["gb_s"], read_size=best_read["size"],
                 gemm_tflop_s=best_gemm["tflop_s"], gemm_n=best_gemm["size"],
                 gemm_burst_tflop_s=burst_gemm["tflop_s"], gemm_burst_n=burst_gemm["size"],
             ),
@@ -208,11 +232,12 @@ def main() -> int:
 
     print(f"{name}  (rows appended to {path})")
     for row in rows:
-        rate = f"{row['gb_s']} GB/s" if row["kernel"] == "copy" else f"{row['tflop_s']} TFLOP/s"
+        rate = f"{row['gb_s']} GB/s" if row["kernel"] != "gemm" else f"{row['tflop_s']} TFLOP/s"
         pct = f"  {row['pct_of_spec']}% of {spec} GB/s spec" if row["pct_of_spec"] != "" else ""
         print(f"  {row['kernel']:5s} {row['size']:>7s}  {row['ms_median']:9.4f} ms  {rate:>16s}{pct}")
     print(f"\ndenominators (largest problem of each, the one that runs long enough to be bound by the hardware):"
           f"\n  copy      {best_copy['gb_s']} GB/s at {best_copy['size']}"
+          f"\n  read      {best_read['gb_s']} GB/s at {best_read['size']}"
           f"\n  BF16 GEMM {best_gemm['tflop_s']} TFLOP/s at n={best_gemm['size']}"
           f"  (fastest size: {burst_gemm['tflop_s']} TFLOP/s at n={burst_gemm['size']})")
     print(json.dumps(gpu_during["sm_mhz"] | {"reasons": gpu_during["clocks_event_reasons"]}))
