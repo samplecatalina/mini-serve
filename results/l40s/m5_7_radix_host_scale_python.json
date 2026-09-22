@@ -1,0 +1,47 @@
+{
+ "num_blocks": 20964,
+ "tree": "python",
+ "shapes": {
+  "unique": {
+   "nodes": 308,
+   "leaves": 308,
+   "cached_blocks": 20944,
+   "build_s": 0.13,
+   "prefix_len_us": 31.9,
+   "match_us": 32.02,
+   "match_lock_unlock_us": 31.89,
+   "evict_1_us": 100.91,
+   "insert_us": 32.0
+  },
+  "chat": {
+   "nodes": 4793,
+   "leaves": 1498,
+   "cached_blocks": 20964,
+   "build_s": 0.37,
+   "prefix_len_us": 19.1,
+   "match_us": 19.6,
+   "match_lock_unlock_us": 20.47,
+   "evict_1_us": 874.48,
+   "insert_us": 28.59
+  },
+  "fine": {
+   "nodes": 19172,
+   "leaves": 18916,
+   "cached_blocks": 20964,
+   "build_s": 0.43,
+   "prefix_len_us": 3.77,
+   "match_us": 4.33,
+   "match_lock_unlock_us": 4.92,
+   "evict_1_us": 9836.03,
+   "insert_us": 10.87
+  }
+ },
+ "git_commit": "a150681c4e7a22dd4711182243cac151697c27c3",
+ "argv": [
+  "scale",
+  "--block-backend",
+  "python",
+  "--out",
+  "/out/m5_7_radix_host_scale_python.json"
+ ]
+}

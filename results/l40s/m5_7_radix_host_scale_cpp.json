@@ -1,0 +1,47 @@
+{
+ "num_blocks": 20964,
+ "tree": "cpp",
+ "shapes": {
+  "unique": {
+   "nodes": 308,
+   "leaves": 308,
+   "cached_blocks": 20944,
+   "build_s": 0.13,
+   "prefix_len_us": 5.31,
+   "match_us": 6.91,
+   "match_lock_unlock_us": 7.36,
+   "evict_1_us": 1.36,
+   "insert_us": 6.52
+  },
+  "chat": {
+   "nodes": 4793,
+   "leaves": 1498,
+   "cached_blocks": 20964,
+   "build_s": 0.21,
+   "prefix_len_us": 3.93,
+   "match_us": 5.11,
+   "match_lock_unlock_us": 5.57,
+   "evict_1_us": 1.12,
+   "insert_us": 6.67
+  },
+  "fine": {
+   "nodes": 19172,
+   "leaves": 18916,
+   "cached_blocks": 20964,
+   "build_s": 0.31,
+   "prefix_len_us": 0.99,
+   "match_us": 1.89,
+   "match_lock_unlock_us": 2.43,
+   "evict_1_us": 1.36,
+   "insert_us": 2.54
+  }
+ },
+ "git_commit": "a150681c4e7a22dd4711182243cac151697c27c3",
+ "argv": [
+  "scale",
+  "--block-backend",
+  "cpp",
+  "--out",
+  "/out/m5_7_radix_host_scale_cpp.json"
+ ]
+}

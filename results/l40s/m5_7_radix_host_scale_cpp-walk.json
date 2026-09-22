@@ -1,0 +1,47 @@
+{
+ "num_blocks": 20964,
+ "tree": "cpp-walk",
+ "shapes": {
+  "unique": {
+   "nodes": 308,
+   "leaves": 308,
+   "cached_blocks": 20944,
+   "build_s": 0.13,
+   "prefix_len_us": 5.45,
+   "match_us": 6.9,
+   "match_lock_unlock_us": 7.24,
+   "evict_1_us": 9.18,
+   "insert_us": 6.44
+  },
+  "chat": {
+   "nodes": 4793,
+   "leaves": 1498,
+   "cached_blocks": 20964,
+   "build_s": 0.21,
+   "prefix_len_us": 4.0,
+   "match_us": 5.22,
+   "match_lock_unlock_us": 5.61,
+   "evict_1_us": 94.71,
+   "insert_us": 6.66
+  },
+  "fine": {
+   "nodes": 19172,
+   "leaves": 18916,
+   "cached_blocks": 20964,
+   "build_s": 0.3,
+   "prefix_len_us": 0.98,
+   "match_us": 1.59,
+   "match_lock_unlock_us": 2.04,
+   "evict_1_us": 1115.92,
+   "insert_us": 3.3
+  }
+ },
+ "git_commit": "a150681c4e7a22dd4711182243cac151697c27c3",
+ "argv": [
+  "scale",
+  "--block-backend",
+  "cpp-walk",
+  "--out",
+  "/out/m5_7_radix_host_scale_cpp-walk.json"
+ ]
+}
