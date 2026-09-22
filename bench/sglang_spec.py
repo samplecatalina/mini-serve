@@ -193,9 +193,16 @@ def run(argv: list[str]) -> int:
                 git_commit=env["git_commit"][:12],
             ))
             print(" ".join(f"{key}={val}" for key, val in rows[-1].items()), flush=True)
-        accept = None
+        accept, t = None, None
         if a.text_acceptance and a.arm != "plain":
-            t = once(wl["text_prompts"], wl["text_output_lens"], stop=wl["stop_ids"])
+            # Measured after the throughput rows and kept apart from them: a failure here must
+            # not take those rows with it.
+            try:
+                t = once(wl["text_prompts"], wl["text_output_lens"], stop=wl["stop_ids"])
+            except Exception as exc:  # noqa: BLE001 - reported, and the rows above are still written
+                print(f"text acceptance failed: {exc!r}", file=sys.stderr)
+                t = None
+        if t is not None:
             accept = dict(run_id=run_id, arm=a.arm, engine="sglang", prompts="text", num_prompts=len(wl["text_prompts"]),
                           spec_algorithm=eff["speculative_algorithm"], spec_steps=eff["speculative_num_steps"],
                           spec_topk=eff["speculative_eagle_topk"], spec_draft_tokens=eff["speculative_num_draft_tokens"],
