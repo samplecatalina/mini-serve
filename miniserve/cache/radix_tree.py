@@ -24,6 +24,8 @@ Two counts protect blocks, and they must agree:
 Eviction frees least recently used leaves with ``lock == 0``; a parent whose
 last child is evicted becomes a candidate in turn. Candidates are collected by
 walking the whole tree, as in mini-sglang: simple, and O(nodes) per eviction.
+(The C++ backend keeps them in an ordered index instead and evicts in the same
+order; see minicore/include/minicore/radix_tree.hpp.)
 Recency is a counter incremented on every match and insert, so eviction order
 is reproducible.
 """
@@ -83,8 +85,18 @@ class RadixTree:
     def prefix_len(self, tokens: Sequence[int]) -> int:
         """Tokens of the longest cached prefix of ``tokens`` in whole blocks, without changing the
         tree (no split, no access time): a lookup that only ranks requests must not affect eviction."""
+        return self._prefix_len(tokens, len(tokens))
+
+    def prefix_lens(self, seqs: Sequence[Sequence[int]], limits: Sequence[int]) -> list[int]:
+        """``prefix_len(seqs[i][:limits[i]])`` for every i, without copying the slices. One call for
+        a whole waiting queue: the C++ backend answers it in one crossing of the binding."""
+        if len(seqs) != len(limits):
+            raise ValueError("prefix_lens: one limit per sequence")
+        return [self._prefix_len(s, min(n, len(s))) for s, n in zip(seqs, limits)]
+
+    def _prefix_len(self, tokens: Sequence[int], n: int) -> int:
         bs = self.block_size
-        limit = len(tokens) // bs * bs
+        limit = n // bs * bs
         node, pos = self.root, 0
         while pos < limit:
             child = node.children.get(tuple(tokens[pos : pos + bs]))

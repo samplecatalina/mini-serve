@@ -1,6 +1,7 @@
 """RadixTree and KVCacheManager: matching, splitting, locking, LRU eviction, and randomized interleavings.
 
-All CPU. The randomized test plays many requests that acquire cached
+All CPU, and every test runs against both backends (the Python reference and the
+C++ one in minicore/, tree and allocator together). The randomized test plays many requests that acquire cached
 prefixes, extend their tables, commit, release, get evicted around, and checks
 after every operation that the tree's lock counts agree with the allocator's
 reference counts, that no block in use is ever evicted, and that every cached
@@ -14,16 +15,33 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
+from miniserve.cache.backend import BACKENDS, OutOfBlocks, allocator_class, radix_tree_class
 from miniserve.cache.kv_cache import KVCacheManager
-from miniserve.cache.radix_tree import RadixTree
+from miniserve.cache.radix_tree import RadixTree as PythonRadixTree
 
 BS = 4
 
 
-def _tree(num_blocks=32):
-    a = BlockAllocator(num_blocks, BS)
-    return RadixTree(a), a
+@pytest.fixture(params=BACKENDS)
+def make(request):
+    """The allocator class of one backend; the tree follows the allocator."""
+    try:
+        return allocator_class(request.param)
+    except ImportError as exc:
+        pytest.skip(str(exc))
+
+
+def _cpp():
+    try:
+        from miniserve.cache import _minicore
+    except ImportError as exc:
+        pytest.skip(str(exc))
+    return _minicore
+
+
+def _tree(make, num_blocks=32):
+    a = make(num_blocks, BS)
+    return radix_tree_class(a)(a), a
 
 
 def _cache(tree: RadixTree, a: BlockAllocator, tokens: list[int]) -> list[int]:
@@ -35,8 +53,8 @@ def _cache(tree: RadixTree, a: BlockAllocator, tokens: list[int]) -> list[int]:
     return blocks
 
 
-def test_match_empty_and_partial_block():
-    t, a = _tree()
+def test_match_empty_and_partial_block(make):
+    t, a = _tree(make)
     assert t.match([1, 2, 3, 4, 5]) == (t.root, [])
     blocks = _cache(t, a, list(range(1, 9)))  # 2 blocks
     assert t.match([1, 2, 3])[1] == []  # less than a block
@@ -46,8 +64,8 @@ def test_match_empty_and_partial_block():
     t.check_invariants()
 
 
-def test_match_splits_at_block_boundary():
-    t, a = _tree()
+def test_match_splits_at_block_boundary(make):
+    t, a = _tree(make)
     blocks = _cache(t, a, list(range(1, 13)))  # one node of 3 blocks
     node, got = t.match([1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0])
     assert got == blocks[:2] and node.blocks == blocks[:2]
@@ -62,11 +80,11 @@ def _shape(node):
 
 
 @pytest.mark.parametrize("seed", range(20))
-def test_prefix_len_agrees_with_match_and_changes_nothing(seed):
+def test_prefix_len_agrees_with_match_and_changes_nothing(make, seed):
     """The read-only lookup schedulers rank requests with: the same length as ``match`` finds, and
     no split node or access time left behind (ranking must not affect eviction)."""
     rng = random.Random(seed)
-    t, a = _tree(64)
+    t, a = _tree(make, 64)
     for _ in range(4):
         base = [rng.randrange(1, 4) for _ in range(rng.randint(0, 20))]
         _cache(t, a, base + [rng.randrange(1, 4) for _ in range(rng.randint(0, 12))])
@@ -79,8 +97,35 @@ def test_prefix_len_agrees_with_match_and_changes_nothing(seed):
     t.check_invariants()
 
 
-def test_insert_shares_prefix_and_ignores_duplicates():
-    t, a = _tree()
+@pytest.mark.parametrize("seed", range(10))
+def test_prefix_lens_is_prefix_len_of_each_slice(make, seed):
+    """The batched lookup the cache-aware order uses: the same answer as one ``prefix_len`` per
+    sliced sequence, for lists and other sequences, and limits beyond the end."""
+    rng = random.Random(seed)
+    t, a = _tree(make, 64)
+    for _ in range(4):
+        _cache(t, a, [rng.randrange(1, 4) for _ in range(rng.randint(0, 24))])
+    seqs = [[rng.randrange(1, 4) for _ in range(rng.randint(0, 30))] for _ in range(12)]
+    seqs[0] = tuple(seqs[0])
+    limits = [rng.randint(0, 35) for _ in seqs]
+    clock = t._clock
+    assert t.prefix_lens(seqs, limits) == [t.prefix_len(list(s)[:n]) for s, n in zip(seqs, limits)]
+    assert t._clock == clock
+    with pytest.raises(ValueError):
+        t.prefix_lens(seqs, limits[:-1])
+
+
+def test_evicted_node_stays_readable(make):
+    """A request can hold a node handle past its eviction (the C++ backend must not free it)."""
+    t, a = _tree(make)
+    _cache(t, a, [1, 1, 1, 1, 2, 2, 2, 2])
+    node, _ = t.match([1, 1, 1, 1, 2, 2, 2, 2])
+    t.clear()
+    assert node.parent is None and node.tokens == [1, 1, 1, 1, 2, 2, 2, 2] and node.is_leaf
+
+
+def test_insert_shares_prefix_and_ignores_duplicates(make):
+    t, a = _tree(make)
     first = _cache(t, a, [1, 2, 3, 4, 5, 6, 7, 8])
     # Same first block, different second one: branch after one block.
     dup = a.allocate(2)
@@ -98,14 +143,14 @@ def test_insert_shares_prefix_and_ignores_duplicates():
     t.check_invariants()
 
 
-def test_insert_rejects_partial_blocks():
-    t, a = _tree()
+def test_insert_rejects_partial_blocks(make):
+    t, a = _tree(make)
     with pytest.raises(ValueError):
         t.insert([1, 2, 3, 4, 5], a.allocate(1))
 
 
-def test_lru_eviction_order_and_parent_promotion():
-    t, a = _tree(8)
+def test_lru_eviction_order_and_parent_promotion(make):
+    t, a = _tree(make, 8)
     x = _cache(t, a, [1, 1, 1, 1, 2, 2, 2, 2])  # root - [1] - [2]      clock 1
     y = _cache(t, a, [1, 1, 1, 1, 3, 3, 3, 3])  # root - [1] - [3]      clock 2
     z = _cache(t, a, [4, 4, 4, 4])  # root - [4]                        clock 3
@@ -119,8 +164,8 @@ def test_lru_eviction_order_and_parent_promotion():
     t.check_invariants()
 
 
-def test_locked_nodes_are_never_evicted():
-    t, a = _tree(8)
+def test_locked_nodes_are_never_evicted(make):
+    t, a = _tree(make, 8)
     _cache(t, a, [1, 1, 1, 1, 2, 2, 2, 2])
     node, blocks = t.match([1, 1, 1, 1, 2, 2, 2, 2])
     a.incref(blocks)  # a request's table holds them
@@ -136,8 +181,8 @@ def test_locked_nodes_are_never_evicted():
         t.unlock(node)
 
 
-def test_split_keeps_locks():
-    t, a = _tree()
+def test_split_keeps_locks(make):
+    t, a = _tree(make)
     _cache(t, a, list(range(1, 13)))
     node, blocks = t.match(list(range(1, 13)))
     a.incref(blocks)
@@ -151,8 +196,8 @@ def test_split_keeps_locks():
     t.check_invariants()
 
 
-def test_clear_refuses_locked_tree():
-    t, a = _tree()
+def test_clear_refuses_locked_tree(make):
+    t, a = _tree(make)
     _cache(t, a, [1, 1, 1, 1])
     node, blocks = t.match([1, 1, 1, 1, 0])
     a.incref(blocks)
@@ -163,6 +208,55 @@ def test_clear_refuses_locked_tree():
     a.free(blocks)
     t.clear()
     assert a.num_free == a.num_blocks
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_cpp_eviction_order_matches_the_reference(seed):
+    """The C++ tree's eviction index and its full walk evict the same blocks in the same order
+    as the Python reference, over random inserts, lookups (which move access times and split
+    nodes) and evictions of a few blocks at a time."""
+    mc = _cpp()
+    rng = random.Random(seed)
+    num_blocks = 40
+    allocs = [mc.BlockAllocator(num_blocks, BS), mc.BlockAllocator(num_blocks, BS), None]
+    from miniserve.cache.block_allocator import BlockAllocator as PyAlloc
+
+    allocs[2] = PyAlloc(num_blocks, BS)
+    trees = [mc.RadixTree(allocs[0]), mc.RadixTree(allocs[1], indexed_eviction=False), PythonRadixTree(allocs[2])]
+    assert trees[0].indexed_eviction and not trees[1].indexed_eviction
+    base = [5, 6, 7, 8]
+    for _ in range(300):
+        op = rng.random()
+        if op < 0.5:
+            q = (base if rng.random() < 0.5 else []) + [rng.randrange(1, 4) for _ in range(rng.randint(1, 3) * BS)]
+            q = q[: len(q) // BS * BS]
+            got = [t.match(q) for t in trees]
+            assert len({tuple(b) for _, b in got}) == 1
+            for t, (node, _) in zip(trees, got):
+                t.lock(node)
+            need = len(q) // BS - len(got[0][1])
+            short = need - allocs[0].num_free
+            if short > 0:
+                assert len({t.evict(short) for t in trees}) == 1
+            for t, (node, _) in zip(trees, got):
+                t.unlock(node)
+            if need <= allocs[0].num_free:
+                for t, al, (_, have) in zip(trees, allocs, got):
+                    fresh = al.allocate(need)
+                    t.insert(q, list(have) + fresh)
+                    al.free(fresh)
+        elif op < 0.8:
+            q = [rng.randrange(1, 4) for _ in range(2 * BS)]
+            for t in trees:
+                t.match(q)
+        else:
+            k = rng.randint(1, 4)
+            assert len({t.evict(k) for t in trees}) == 1
+        refs = [[al.refcount(b) for b in range(num_blocks)] for al in allocs]
+        assert refs[0] == refs[1] == refs[2]
+        assert len({t._clock for t in trees}) == 1
+        for t in trees:
+            t.check_invariants()
 
 
 # --------------------------------------------------------------------------- KVCacheManager
@@ -182,8 +276,8 @@ class _Req:
         return len(self.prompt_ids) + len(self.output_ids)
 
 
-def test_manager_acquire_leaves_one_token_to_compute():
-    kv = KVCacheManager(BlockAllocator(16, BS))
+def test_manager_acquire_leaves_one_token_to_compute(make):
+    kv = KVCacheManager(make(16, BS))
     x = _Req(0, list(range(1, 9)))  # exactly 2 blocks
     kv.acquire(x)
     x.cache.append_tokens(8)
@@ -195,8 +289,20 @@ def test_manager_acquire_leaves_one_token_to_compute():
     kv.check_invariants()
 
 
-def test_manager_without_radix_is_plain_accounting():
-    kv = KVCacheManager(BlockAllocator(4, BS), radix=False)
+def test_manager_cached_prefix_lens_matches_one_by_one(make):
+    kv = KVCacheManager(make(32, BS))
+    x = _Req(0, list(range(1, 17)))
+    kv.acquire(x)
+    x.cache.append_tokens(16)
+    kv.release(x)
+    reqs = [_Req(1, list(range(1, 17))), _Req(2, list(range(1, 9)), [9, 10, 11, 12, 13]), _Req(3, [7, 7, 7, 7, 7]), _Req(4, [])]
+    reqs[3].output_ids = [1]
+    assert kv.cached_prefix_lens(reqs) == [kv.cached_prefix_len(r) for r in reqs] == [12, 12, 0, 0]
+    assert KVCacheManager(make(4, BS), radix=False).cached_prefix_lens(reqs) == [0, 0, 0, 0]
+
+
+def test_manager_without_radix_is_plain_accounting(make):
+    kv = KVCacheManager(make(4, BS), radix=False)
     x = _Req(0, list(range(1, 9)))
     assert kv.acquire(x) == 0
     x.cache.append_tokens(8)
@@ -204,8 +310,8 @@ def test_manager_without_radix_is_plain_accounting():
     assert kv.allocator.num_free == 4 and kv.num_available == 4
 
 
-def test_manager_reserve_evicts_and_fails_cleanly():
-    kv = KVCacheManager(BlockAllocator(4, BS))
+def test_manager_reserve_evicts_and_fails_cleanly(make):
+    kv = KVCacheManager(make(4, BS))
     x = _Req(0, list(range(1, 13)))
     kv.acquire(x)
     x.cache.append_tokens(12)
@@ -219,14 +325,14 @@ def test_manager_reserve_evicts_and_fails_cleanly():
 
 
 @pytest.mark.parametrize("seed", range(40))
-def test_randomized_interleaving(seed):
+def test_randomized_interleaving(make, seed):
     """Random requests over a few shared prefixes: acquire, extend, commit, release, reserve.
 
     A shadow map remembers which token each (block, offset) holds as tables are
     written; every cached path must spell tokens that its blocks actually hold."""
     rng = random.Random(seed)
     num_blocks = rng.choice([6, 12, 40])
-    kv = KVCacheManager(BlockAllocator(num_blocks, BS))
+    kv = KVCacheManager(make(num_blocks, BS))
     content: dict[tuple[int, int], int] = {}  # (block, offset) -> token written
     prefixes = [[rng.randrange(1, 9) for _ in range(rng.randint(2, 14))] for _ in range(3)]
     live: list[_Req] = []

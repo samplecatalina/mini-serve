@@ -13,7 +13,10 @@ milestones. ``MINISERVE_BLOCK_BACKEND=cpp`` selects the other one, and
 
 Only the allocator class is selected here. A table is created through
 ``allocator.new_table(...)``, so a table always matches its allocator's backend
-and no caller has to name a table class.
+and no caller has to name a table class. The prefix cache tree follows the
+allocator the same way (``radix_tree_class``): a C++ tree frees and increfs
+blocks of a C++ allocator without calling back into Python, and a Python tree
+works on a Python allocator.
 """
 
 from __future__ import annotations
@@ -29,7 +32,15 @@ ENV_VAR = "MINISERVE_BLOCK_BACKEND"
 from miniserve.cache.block_table import BlockTable as PythonBlockTable
 from miniserve.cache.block_table import pack_block_tables as _pack_python
 
-__all__ = ["BACKENDS", "ENV_VAR", "OutOfBlocks", "allocator_class", "default_backend", "pack_block_tables"]
+__all__ = [
+    "BACKENDS",
+    "ENV_VAR",
+    "OutOfBlocks",
+    "allocator_class",
+    "default_backend",
+    "pack_block_tables",
+    "radix_tree_class",
+]
 
 
 def default_backend() -> str:
@@ -59,6 +70,17 @@ def allocator_class(backend: str | None = None):
 
         return CppBlockAllocator
     raise ValueError(f"unknown block backend {name!r}, expected one of {BACKENDS}")
+
+
+def radix_tree_class(allocator):
+    """The prefix cache tree class that works on ``allocator``: the one of the same backend."""
+    if isinstance(allocator, PythonBlockAllocator):
+        from miniserve.cache.radix_tree import RadixTree
+
+        return RadixTree
+    from miniserve.cache._minicore import RadixTree as CppRadixTree
+
+    return CppRadixTree
 
 
 def pack_block_tables(tables, pad_rows: int, pad_block: int, pad_last: int, indptr, indices, last) -> int:

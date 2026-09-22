@@ -26,15 +26,15 @@ accounting: empty prefixes, nothing inserted.
 
 from __future__ import annotations
 
+from miniserve.cache.backend import radix_tree_class
 from miniserve.cache.block_allocator import BlockAllocator, OutOfBlocks
-from miniserve.cache.radix_tree import RadixTree
 
 
 class KVCacheManager:
     def __init__(self, allocator: BlockAllocator, radix: bool = True):
         self.allocator = allocator
         self.block_size = allocator.block_size
-        self.tree: RadixTree | None = RadixTree(allocator) if radix else None
+        self.tree = radix_tree_class(allocator)(allocator) if radix else None
 
     @property
     def radix(self) -> bool:
@@ -44,7 +44,7 @@ class KVCacheManager:
         """Switch the prefix cache on or off (clearing it). Only while no request holds KV."""
         if self.tree is not None:
             self.tree.clear()
-        self.tree = RadixTree(self.allocator) if enabled else None
+        self.tree = radix_tree_class(self.allocator)(self.allocator) if enabled else None
 
     @property
     def num_available(self) -> int:
@@ -69,6 +69,14 @@ class KVCacheManager:
         if self.tree is None:
             return 0
         return self.tree.prefix_len(self._tokens(req)[: req.seq_len - 1])
+
+    def cached_prefix_lens(self, reqs) -> list[int]:
+        """``cached_prefix_len`` of every request, in one lookup call. A request that has no output
+        yet (the usual waiting one) passes its prompt as is: no concatenation, no slice."""
+        if self.tree is None:
+            return [0] * len(reqs)
+        seqs = [r.prompt_ids if not r.output_ids else r.prompt_ids + r.output_ids for r in reqs]
+        return self.tree.prefix_lens(seqs, [r.seq_len - 1 for r in reqs])
 
     def abandon(self, req) -> None:
         """Undo ``acquire``: nothing was computed, nothing is inserted."""
