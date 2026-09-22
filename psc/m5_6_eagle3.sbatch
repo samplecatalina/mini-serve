@@ -72,6 +72,16 @@ gpu_free() {  # sglang runs its scheduler in child processes; wait until the mem
   el "  WARNING: ${used} MiB still in use"
 }
 
+sg_run() {  # sg_run <workload> <arm> <cap> [--text-acceptance]
+  "${SG[@]}" python -m bench.sglang_spec run --workload "$1" --arm "$2" --max-running "$3" \
+    --kv-pool-tokens "$POOL" --out m5_6_sglang --results-dir /out ${4:-}
+}
+# sglang's two-model path fails now and then when it merges a running batch with a newly
+# prefilled one (it concatenates the target's and the draft's hidden states): once more
+# before the step counts as failed. A run writes its rows only when it completes, so a
+# failed attempt leaves nothing behind.
+sg_try() { sg_run "$@" || { gpu_free; el "  retrying once"; sg_run "$@"; }; }
+
 # The same settings on both engines: 8B, pool of $POOL tokens, chunks of 2048, a prefill
 # budget of 8192, graphs to the running cap, FlashInfer's 512 MiB scratch here (D-080's reason).
 W="--model 8B --workload unique --prefix-len 480 --suffix-len 32 --output-len 128 --kv-pool-tokens $POOL --rounds 2
@@ -84,8 +94,7 @@ for n in $SIZES; do
   step "batch $n: this engine, plain" "${MS[@]}" python -m bench.offline $W $S --out m5_6_ours
   for arm in $SG_ARMS; do
     text=""; [ "$n" = 8 ] && text="--text-acceptance"
-    step "batch $n: sglang $arm" "${SG[@]}" python -m bench.sglang_spec run --workload "$wl" --arm "$arm" \
-      --max-running "$n" --kv-pool-tokens "$POOL" --out m5_6_sglang --results-dir /out $text
+    step "batch $n: sglang $arm" sg_try "$wl" "$arm" "$n" $text
     gpu_free
   done
   step "batch $n: this engine, two-model gamma 4" "${MS[@]}" python -m bench.offline $W $S \

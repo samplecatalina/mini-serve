@@ -98,6 +98,10 @@ def engine_args(arm: str, wl: dict, a) -> dict:
         max_running_requests=a.max_running, cuda_graph_max_bs=a.max_running,
         max_total_tokens=a.kv_pool_tokens, chunked_prefill_size=a.chunked_prefill_size,
         max_prefill_tokens=a.max_prefill_tokens, skip_tokenizer_init=True, log_level="warning",
+        # Prefill in piecewise CUDA graphs is on by default in 0.5.10 and, on this caliber, fails
+        # at a cap of 2 (FlashInfer's prefill plan gets a kv_indptr one entry too long). This
+        # engine does not capture prefills either, so it is off on every arm.
+        disable_piecewise_cuda_graph=True,
     )
     chain = dict(speculative_num_steps=a.gamma, speculative_eagle_topk=1, speculative_num_draft_tokens=a.gamma + 1)
     if arm == "standalone":
@@ -164,18 +168,30 @@ def run(argv: list[str]) -> int:
     env = dict(sidecar.environment(), sglang=sglang.__version__)
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     with sidecar.GpuSampler() as gpu:
-        t_warm, warm_runs = time.monotonic(), 0
+        # The same two settling rules as bench/offline.py: the last window of samples against
+        # the one before, or a whole warm-up run's mean clock against the previous run's (an
+        # 8B model's prefills hit the power cap and its decodes do not, so short windows of
+        # its samples never agree).
+        t_warm, warm_runs, prev_mean, settled_by = time.monotonic(), 0, None, None
         while True:
+            t_run = gpu.sample_now()
             once(wl["warm_prompts"], wl["warm_output_lens"])
+            mean = gpu.summary(since=t_run, until=gpu.sample_now())["sm_mhz"]["mean"]
             warm_runs += 1
             elapsed = time.monotonic() - t_warm
-            if elapsed >= a.warmup_min_s and gpu.settled():
+            if elapsed >= a.warmup_min_s:
+                if gpu.settled():
+                    settled_by = "window"
+                elif prev_mean is not None and abs(mean - prev_mean) <= 0.02 * mean:
+                    settled_by = "run"
+            if settled_by:
                 break
+            prev_mean = mean
             if elapsed >= a.warmup_max_s:
                 print(f"SM clock not settled after {elapsed:.0f} s of warm-up", file=sys.stderr)
                 llm.shutdown()
                 return 3
-        warmup = dict(seconds=round(elapsed, 1), runs=warm_runs, gpu=gpu.summary(since=t_warm))
+        warmup = dict(seconds=round(elapsed, 1), runs=warm_runs, settled_by=settled_by, gpu=gpu.summary(since=t_warm))
         rows, per_run_gpu = [], []
         for k in range(a.rounds):
             t_start = gpu.sample_now()
