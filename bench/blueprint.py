@@ -94,7 +94,7 @@ def dump(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bench.blueprint dump")
     ap.add_argument("--out", required=True)
     ap.add_argument("--model", default="0.6B")
-    ap.add_argument("--workload", choices=["shared", "unique", "mixed", "policy"], required=True)
+    ap.add_argument("--workload", choices=["shared", "unique", "mixed", "policy", "chat"], required=True)
     ap.add_argument("--groups", type=int, default=16)
     ap.add_argument("--per-group", type=int, default=16)
     ap.add_argument("--prefix-len", type=int, default=96)
@@ -122,6 +122,8 @@ def dump(argv: list[str]) -> int:
         "model_path": str(model_path(spec_for(a.model), download=False)),
         "prompts": w.prompts, "output_lens": w.output_lens,
         "warm_prompts": warm.prompts, "warm_output_lens": warm.output_lens,
+        # Non-empty: requests end at this token, and output_lens is only their cap.
+        "stop_ids": sorted(w.stop_ids),
         "aligned": ALIGNED, "miniserve_args": MINISERVE_FLAGS,
     }
     with open(a.out, "w") as f:
@@ -198,13 +200,19 @@ def run(argv: list[str]) -> int:
         num_page_override=a.kv_pool_tokens,
     )
 
+    # A workload with a stop token lets requests end on it; the blueprint stops on its
+    # tokenizer's eos, so that must be the one token the workload names.
+    stop = wl.get("stop_ids") or []
+    if stop and stop != [llm.eos_token_id]:
+        raise SystemExit(f"the workload stops on {stop}, the blueprint only on its eos {llm.eos_token_id}")
+
     def once(prompts, output_lens) -> dict:
         llm.start(len(prompts))
-        params = [SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=n) for n in output_lens]
+        params = [SamplingParams(temperature=0.0, ignore_eos=not stop, max_tokens=n) for n in output_lens]
         llm.generate(prompts, params)
         times = llm.token_times
         for k, ts in enumerate(times):
-            if len(ts) != output_lens[k]:
+            if (not 1 <= len(ts) <= output_lens[k]) if stop else len(ts) != output_lens[k]:
                 raise SystemExit(f"request {k}: {len(ts)} tokens, asked for {output_lens[k]}")
         ttft = [ts[0] for ts in times]
         e2e = [ts[-1] for ts in times]
@@ -215,7 +223,8 @@ def run(argv: list[str]) -> int:
             e2e_mean_ms=round(statistics.mean(e2e) * 1e3, 1), e2e_p99_ms=round(pct(e2e, 99) * 1e3, 1),
             itl_p50_ms=round(pct(itl, 50) * 1e3, 2), itl_p99_ms=round(pct(itl, 99) * 1e3, 2),
             itl_max_ms=round(max(itl) * 1e3, 2),
-            output_tok_s=round(sum(output_lens) / span, 1), span_s=round(span, 3),
+            output_tok_s=round(sum(len(ts) for ts in times) / span, 1), span_s=round(span, 3),
+            output_tokens=sum(len(ts) for ts in times),
         )
 
     eff = engine_readback(llm, a)
@@ -259,7 +268,7 @@ def run(argv: list[str]) -> int:
             rows.append(dict(
                 run_id=run_id, run=k, arm="minisgl",
                 workload=wl["caliber"]["workload"], requests=len(wl["prompts"]),
-                prompt_tokens=sum(map(len, wl["prompts"])), output_tokens=sum(wl["output_lens"]),
+                prompt_tokens=sum(map(len, wl["prompts"])),
                 kv_pool_tokens=a.kv_pool_tokens, **r,
                 blueprint_commit=BLUEPRINT_COMMIT[:12], git_commit=env["git_commit"][:12],
                 sm_mhz_mean=gpu_run["sm_mhz"]["mean"],

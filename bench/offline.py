@@ -59,9 +59,58 @@ VOCAB_LIMIT = 150_000  # random prompt ids stay below the special-token range
 @dataclass
 class Workload:
     prompts: list[list[int]]
-    output_lens: list[int]
+    output_lens: list[int]  # the cap; with stop_ids a request may end before it
     arrivals: list[float]  # seconds after start, sorted
     long: list[bool]  # per request: a long prompt (``mixed``) or a long output (``policy``)
+    stop_ids: frozenset[int] = frozenset()  # empty: every request produces exactly its output_lens
+
+
+# The ``chat`` workload: short-answer questions, so that the answers end on their own well
+# before the cap, at lengths the engine cannot know in advance.
+CHAT_TEMPLATES = (
+    "Explain {} in one sentence.",
+    "Give two facts about {}.",
+    "What is {}? Answer briefly.",
+    "Write a haiku about {}.",
+    "List three uses of {}.",
+    "Describe {} to a child in two sentences.",
+    "Why does {} matter? Answer in a short paragraph.",
+    "Summarize the history of {} in three sentences.",
+)
+CHAT_TOPICS = (
+    "photosynthesis", "the moon", "volcanoes", "coffee", "bridges", "honeybees", "the internet", "glaciers",
+    "chess", "electric cars", "rainbows", "the printing press", "vaccines", "black holes", "origami", "tides",
+    "jazz", "deserts", "compilers", "bicycles", "coral reefs", "magnets", "the Roman Empire", "penguins",
+    "solar panels", "earthquakes", "libraries", "tea", "rivers", "telescopes", "DNA", "lightning",
+    "maple syrup", "submarines", "paper", "clocks", "wind turbines", "owls", "pyramids", "batteries",
+    "recycling", "mountains", "sourdough bread", "satellites", "octopuses", "the violin", "hurricanes", "gardens",
+    "trains", "snowflakes", "mushrooms", "lighthouses", "the heart", "cheese", "maps", "kites",
+    "rockets", "whales", "silk", "glass", "salt", "sleep", "fireflies", "typewriters",
+)
+
+
+def chat_prompts(model: str, n: int, rng: random.Random) -> tuple[list[list[int]], frozenset[int]]:
+    """``n`` of the template x topic questions in the model's chat format, and the token that ends
+    an answer. Only the end-of-turn token: the blueprint stops on its tokenizer's single
+    ``eos_token_id``, and both sides must stop on the same thing."""
+    from transformers import AutoTokenizer
+
+    from miniserve.model.weights import model_path, spec_for
+
+    tok = AutoTokenizer.from_pretrained(str(model_path(spec_for(model), download=False)))
+    questions = [t.format(topic) for topic in CHAT_TOPICS for t in CHAT_TEMPLATES]
+    if n > len(questions):
+        raise SystemExit(f"the chat workload has {len(questions)} questions, asked for {n}")
+    rng.shuffle(questions)
+    prompts = [
+        tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True,
+                                enable_thinking=False, tokenize=True, return_dict=False)
+        for q in questions[:n]
+    ]
+    end = tok.convert_tokens_to_ids("<|im_end|>")
+    if end != tok.eos_token_id:
+        raise SystemExit(f"end of turn {end} is not the tokenizer's eos {tok.eos_token_id}")
+    return prompts, frozenset({end})
 
 
 def make_workload(args, seed: int) -> Workload:
@@ -71,7 +120,9 @@ def make_workload(args, seed: int) -> Workload:
     (``--long-len``, ``--long-output-len``) at random places in the arrival order. ``policy``:
     the ``shared`` groups, each request asking for ``--short-output-len`` or (a
     ``--long-fraction`` of them) ``--long-output-len`` tokens: prefix sharing for a cache-aware
-    order to exploit, and a spread of job sizes for shortest-job-first."""
+    order to exploit, and a spread of job sizes for shortest-job-first. ``chat``: natural
+    short-answer questions in the model's chat format, each stopping at the end of its answer
+    (``--output-len`` is only the cap): requests finish early, at lengths nobody knows in advance."""
     rng = random.Random(seed)
     n = args.groups * args.per_group
 
@@ -80,6 +131,7 @@ def make_workload(args, seed: int) -> Workload:
 
     long = [False] * n
     output_lens = [args.output_len] * n
+    stop_ids: frozenset[int] = frozenset()
     if args.workload == "shared":
         prefixes = [rand(args.prefix_len) for _ in range(args.groups)]
         prompts = [prefixes[g] + rand(args.suffix_len) for g in range(args.groups) for _ in range(args.per_group)]
@@ -97,6 +149,8 @@ def make_workload(args, seed: int) -> Workload:
         long = [i in long_at for i in range(n)]
         prompts = [rand(args.long_len if lg else args.short_len) for lg in long]
         output_lens = [args.long_output_len if lg else args.output_len for lg in long]
+    elif args.workload == "chat":
+        prompts, stop_ids = chat_prompts(args.model, n, rng)
     else:
         raise ValueError(args.workload)
     if args.arrival_rate > 0:
@@ -106,7 +160,7 @@ def make_workload(args, seed: int) -> Workload:
             t += rng.expovariate(args.arrival_rate)
     else:
         arrivals = [0.0] * n
-    return Workload(prompts, output_lens, arrivals, long)
+    return Workload(prompts, output_lens, arrivals, long, stop_ids)
 
 
 # --------------------------------------------------------------------------- one run
@@ -144,7 +198,8 @@ def run(eng: Engine, w: Workload) -> RunResult:
         now = time.perf_counter() - t0
         while i < n and w.arrivals[i] <= now:
             # no stop tokens: exactly the requested number of tokens each
-            req_index[eng.add_request(w.prompts[i], SamplingParams(w.output_lens[i])).rid] = i
+            params = SamplingParams(w.output_lens[i], stop_token_ids=w.stop_ids)
+            req_index[eng.add_request(w.prompts[i], params).rid] = i
             i += 1
         if not eng.has_unfinished:
             time.sleep(max(0.0, w.arrivals[i] - (time.perf_counter() - t0)))
@@ -178,13 +233,16 @@ def run(eng: Engine, w: Workload) -> RunResult:
             while k > len(times):
                 times.append(t)
     for k, times in enumerate(token_times):
-        assert len(times) == w.output_lens[k], f"request {k}: {len(times)} tokens"
+        if w.stop_ids:
+            assert 1 <= len(times) <= w.output_lens[k], f"request {k}: {len(times)} tokens"
+        else:
+            assert len(times) == w.output_lens[k], f"request {k}: {len(times)} tokens"
         res.ttft.append(times[0] - w.arrivals[k])
         (res.ttft_long if w.long[k] else res.ttft_short).append(res.ttft[-1])
         res.e2e.append(times[-1] - w.arrivals[k])
         (res.e2e_long if w.long[k] else res.e2e_short).append(res.e2e[-1])
         res.itl += [b - a for a, b in zip(times, times[1:])]
-    res.output_tokens = sum(w.output_lens)
+    res.output_tokens = sum(len(times) for times in token_times)
     res.span_s = max(t[-1] for t in token_times) - min(w.arrivals)
     res.wall_s = time.perf_counter() - t0
     return res
@@ -269,7 +327,7 @@ def main() -> int:
     add_spec_args(ap)
     g = ap.add_argument_group("benchmark")
     g.add_argument("--model", default="0.6B", help="target model: a pinned size (0.6B, 1.7B, 8B)")
-    g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy"], required=True)
+    g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy", "chat"], required=True)
     g.add_argument("--groups", type=int, default=8)
     g.add_argument("--per-group", type=int, default=8)
     g.add_argument("--prefix-len", type=int, default=1024)
