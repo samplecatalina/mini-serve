@@ -1,0 +1,213 @@
+{
+  "run_id": "20260922T095123",
+  "config": {
+    "max_running": 1,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 65536,
+    "seed": 0,
+    "disable_radix": false,
+    "chunked_prefill_size": null,
+    "schedule_policy": "fcfs",
+    "disable_overlap": false,
+    "disable_cuda_graph": false,
+    "cuda_graph_max_bs": 1,
+    "attn_workspace_mb": 512,
+    "block_backend": null,
+    "spec_draft": null,
+    "spec_gamma": 4,
+    "model": "8B",
+    "workload": "unique",
+    "groups": 8,
+    "per_group": 1,
+    "prefix_len": 480,
+    "suffix_len": 32,
+    "output_len": 128,
+    "num_long": 8,
+    "long_len": 3072,
+    "long_output_len": 16,
+    "short_len": 256,
+    "long_fraction": 0.25,
+    "short_output_len": 32,
+    "arrival_rate": 0.0,
+    "workload_seed": 0,
+    "ablate": "none",
+    "rounds": 2,
+    "arms": null,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 300.0,
+    "out": "m5_6_ours",
+    "allow_dirty": false,
+    "results_dir": "/out",
+    "engine": {
+      "max_running": 1,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 65536,
+      "seed": 0,
+      "radix": true,
+      "chunked_prefill_size": null,
+      "cuda_graph": true,
+      "overlap": true,
+      "schedule_policy": "fcfs",
+      "cuda_graph_max_bs": 1,
+      "block_backend": null,
+      "attn_workspace_mb": 512
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 818221056,
+      "free_bytes": 29916004352,
+      "total_bytes": 47695921152,
+      "block_bytes": 2359296,
+      "max_blocks": 11099,
+      "num_blocks": 4096,
+      "graph_buckets": [
+        1
+      ],
+      "graph_bytes": 17344512,
+      "graph_capture_s": 0.17
+    }
+  },
+  "environment": {
+    "git_commit": "e82ee8e8813c099bf30b45fb7877846ac03ecdde",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.57.04",
+    "cpu": "Intel(R) Xeon(R) 6740E"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 677961.394096405,
+      "name": "NVIDIA L40S",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 22,
+      "power_w": 33.07,
+      "power_limit_w": 350.0,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 0
+    },
+    "idle_power_limit_w": [
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0
+    ],
+    "power_max_limit_w": 350.0,
+    "host": null
+  },
+  "warmup": {
+    "seconds": 24.8,
+    "runs": 1,
+    "settled_by": "window",
+    "gpu": {
+      "num_samples": 45,
+      "sm_mhz": {
+        "min": 2430,
+        "max": 2520,
+        "mean": 2515.0
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 34,
+        "max": 45,
+        "mean": 41.36
+      },
+      "power_w": {
+        "min": 174.15,
+        "max": 271.33,
+        "mean": 257.51
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "default",
+      "num_samples": 44,
+      "sm_mhz": {
+        "min": 2415,
+        "max": 2520,
+        "mean": 2515.91
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 43,
+        "max": 50,
+        "mean": 47.66
+      },
+      "power_w": {
+        "min": 247.11,
+        "max": 277.27,
+        "mean": 267.58
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "default",
+      "num_samples": 46,
+      "sm_mhz": {
+        "min": 2190,
+        "max": 2520,
+        "mean": 2509.57
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 47,
+        "max": 53,
+        "mean": 51.46
+      },
+      "power_w": {
+        "min": 254.6,
+        "max": 281.02,
+        "mean": 271.08
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}

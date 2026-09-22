@@ -1,0 +1,4 @@
+run_id,arm,engine,prompts,num_prompts,spec_algorithm,spec_steps,spec_topk,spec_draft_tokens,tokens_per_round,output_tokens,git_commit
+20260922T102832,standalone,sglang,text,6,STANDALONE,4,1,5,3.0749,1150,e82ee8e8813c
+20260922T103024,eagle3,sglang,text,6,EAGLE3,4,1,5,2.1004,1151,e82ee8e8813c
+20260922T103216,eagle3_auto,sglang,text,6,EAGLE3,3,1,4,1.9263,1150,e82ee8e8813c

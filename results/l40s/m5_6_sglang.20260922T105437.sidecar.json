@@ -1,0 +1,205 @@
+{
+  "run_id": "20260922T105437",
+  "config": {
+    "workload": "/tmp/m5_6_w32.json",
+    "arm": "eagle3",
+    "out": "m5_6_sglang",
+    "max_running": 32,
+    "gamma": 4,
+    "kv_pool_tokens": 65536,
+    "chunked_prefill_size": 2048,
+    "max_prefill_tokens": 8192,
+    "rounds": 2,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 300.0,
+    "text_acceptance": false,
+    "results_dir": "/out",
+    "caliber": {
+      "out": "/tmp/m5_6_w32.json",
+      "model": "8B",
+      "draft": "0.6B",
+      "max_running": 32,
+      "requests": 128,
+      "prefix_len": 480,
+      "suffix_len": 32,
+      "output_len": 128,
+      "workload_seed": 0,
+      "workload": "unique"
+    },
+    "engine_args": {
+      "model_path": "/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218",
+      "dtype": "bfloat16",
+      "attention_backend": "flashinfer",
+      "max_running_requests": "32",
+      "cuda_graph_max_bs": "32",
+      "max_total_tokens": "65536",
+      "chunked_prefill_size": "2048",
+      "max_prefill_tokens": "8192",
+      "skip_tokenizer_init": "True",
+      "log_level": "warning",
+      "disable_piecewise_cuda_graph": "True",
+      "speculative_algorithm": "EAGLE3",
+      "speculative_draft_model_path": "/cache/huggingface/hub/models--Tengyunw--qwen3_8b_eagle3/snapshots/2a1059d51f622b8cad7d7d72840153ffea5488a0",
+      "speculative_num_steps": "4",
+      "speculative_eagle_topk": "1",
+      "speculative_num_draft_tokens": "5"
+    },
+    "engine": {
+      "max_running_requests": 32,
+      "cuda_graph_max_bs": 32,
+      "max_total_tokens": 65536,
+      "chunked_prefill_size": 2048,
+      "speculative_algorithm": "EAGLE3",
+      "speculative_num_steps": 4,
+      "speculative_eagle_topk": 1,
+      "speculative_num_draft_tokens": 5,
+      "attention_backend": "flashinfer"
+    },
+    "eagle3_head": [
+      "Tengyunw/qwen3_8b_eagle3",
+      "2a1059d51f622b8cad7d7d72840153ffea5488a0"
+    ]
+  },
+  "environment": {
+    "git_commit": "e82ee8e8813c099bf30b45fb7877846ac03ecdde",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu129",
+    "cuda": "12.9",
+    "flashinfer": "0.6.7.post2",
+    "driver": "610.57.04",
+    "cpu": "Intel(R) Xeon(R) 6740E",
+    "sglang": "0.5.10"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 684519.105311087,
+      "name": "NVIDIA L40S",
+      "sm_mhz": 210,
+      "mem_mhz": 9001,
+      "temp_c": 53,
+      "power_w": 67.5,
+      "power_limit_w": 350.0,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 0
+    },
+    "idle_power_limit_w": [
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0
+    ],
+    "power_max_limit_w": 350.0,
+    "host": null
+  },
+  "warmup": {
+    "seconds": 38.0,
+    "runs": 2,
+    "settled_by": "run",
+    "gpu": {
+      "num_samples": 72,
+      "sm_mhz": {
+        "min": 1620,
+        "max": 2520,
+        "mean": 2325.21
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 38,
+        "max": 58,
+        "mean": 52.94
+      },
+      "power_w": {
+        "min": 98.23,
+        "max": 349.12,
+        "mean": 306.67
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "eagle3",
+      "num_samples": 37,
+      "sm_mhz": {
+        "min": 1635,
+        "max": 2520,
+        "mean": 2257.7
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 51,
+        "max": 61,
+        "mean": 58.57
+      },
+      "power_w": {
+        "min": 248.98,
+        "max": 351.07,
+        "mean": 320.0
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "eagle3",
+      "num_samples": 37,
+      "sm_mhz": {
+        "min": 1770,
+        "max": 2520,
+        "mean": 2314.46
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 54,
+        "max": 64,
+        "mean": 61.46
+      },
+      "power_w": {
+        "min": 247.52,
+        "max": 340.72,
+        "mean": 313.56
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}
