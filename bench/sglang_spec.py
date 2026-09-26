@@ -37,7 +37,13 @@ import time
 from bench import sidecar
 
 # Public EAGLE-3 head for Qwen3-8B, pinned (the one sglang's documentation uses for Qwen3).
-EAGLE3_HEAD = ("Tengyunw/qwen3_8b_eagle3", "2a1059d51f622b8cad7d7d72840153ffea5488a0")
+# Public EAGLE-3 heads for Qwen3-8B, pinned. Tengyunw's is the one M5.6 measured; AngelSlim's is
+# a second, independently trained head (LlamaForCausalLMEagle3, which sglang loads as is).
+EAGLE3_HEADS = {
+    "tengyunw": ("Tengyunw/qwen3_8b_eagle3", "2a1059d51f622b8cad7d7d72840153ffea5488a0"),
+    "angelslim": ("AngelSlim/Qwen3-8B_eagle3", "9629dfce7a4a10564dd48d3e5485c3976095653c"),
+}
+EAGLE3_HEAD = EAGLE3_HEADS["tengyunw"]
 
 ARMS = ("plain", "standalone", "eagle3", "eagle3_auto")
 
@@ -56,13 +62,16 @@ def dump(argv: list[str]) -> int:
     ap.add_argument("--suffix-len", type=int, default=32)
     ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--workload-seed", type=int, default=0)
+    ap.add_argument("--workload", choices=["unique", "mtbench"], default="unique",
+                    help="unique: random ids, exactly --output-len each; mtbench: MT-Bench questions in the chat "
+                         "format, each stopping at the end of its answer (--output-len is the cap)")
     a = ap.parse_args(argv)
-    # bench/offline.py's `unique` workload with --groups <requests> --per-group 1: the caliber of
-    # its speculative-decoding runs.
+    # bench/offline.py's workloads with --groups <requests> --per-group 1: the caliber of its
+    # speculative-decoding runs.
     cal = argparse.Namespace(
-        workload="unique", groups=a.requests, per_group=1, prefix_len=a.prefix_len, suffix_len=a.suffix_len,
-        output_len=a.output_len, num_long=0, long_len=0, long_output_len=0, short_len=0, long_fraction=0.0,
-        short_output_len=0, arrival_rate=0.0,
+        workload=a.workload, model=a.model, groups=a.requests, per_group=1, prefix_len=a.prefix_len,
+        suffix_len=a.suffix_len, output_len=a.output_len, num_long=0, long_len=0, long_output_len=0, short_len=0,
+        long_fraction=0.0, short_output_len=0, arrival_rate=0.0,
     )
     w = make_workload(cal, seed=a.workload_seed)
     warm = make_workload(cal, seed=a.workload_seed + 1_000_003)
@@ -73,7 +82,9 @@ def dump(argv: list[str]) -> int:
 
     text_ids, text_lens = text_prompts(str(model_path(spec_for(a.model), download=False)))
     rec = {
-        "caliber": dict(vars(a), workload="unique"),
+        "caliber": dict(vars(a)),
+        # Tokens that end a throughput request (empty: every request runs to its output length).
+        "throughput_stop_ids": sorted(w.stop_ids),
         "model_path": str(model_path(spec_for(a.model), download=False)),
         "draft_path": str(model_path(spec_for(a.draft), download=False)),
         "prompts": w.prompts, "output_lens": w.output_lens,
@@ -86,10 +97,20 @@ def dump(argv: list[str]) -> int:
     return 0
 
 
-def eagle3_path() -> str:
+def eagle3_path(head: str = "tengyunw") -> str:
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(EAGLE3_HEAD[0], revision=EAGLE3_HEAD[1], local_files_only=True)
+    repo, rev = EAGLE3_HEADS[head]
+    return snapshot_download(repo, revision=rev, local_files_only=True)
+
+
+def tree_shape(spec: str) -> dict:
+    """``STEPS,TOPK,TOKENS`` -> sglang's three speculative shape settings. TOPK > 1 verifies a tree:
+    TOKENS draft tokens chosen from TOPK candidates at each of STEPS depths."""
+    steps, topk, tokens = (int(x) for x in spec.split(","))
+    if topk < 1 or steps < 1 or not (steps < tokens <= steps * topk + 1 or (topk == 1 and tokens == steps + 1)):
+        raise SystemExit(f"--tree {spec}: need STEPS >= 1, TOPK >= 1 and STEPS < TOKENS <= STEPS * TOPK + 1")
+    return dict(speculative_num_steps=steps, speculative_eagle_topk=topk, speculative_num_draft_tokens=tokens)
 
 
 def engine_args(arm: str, wl: dict, a) -> dict:
@@ -107,9 +128,10 @@ def engine_args(arm: str, wl: dict, a) -> dict:
     if arm == "standalone":
         kw.update(speculative_algorithm="STANDALONE", speculative_draft_model_path=wl["draft_path"], **chain)
     elif arm == "eagle3":
-        kw.update(speculative_algorithm="EAGLE3", speculative_draft_model_path=eagle3_path(), **chain)
+        shape = tree_shape(a.tree) if getattr(a, "tree", None) else chain
+        kw.update(speculative_algorithm="EAGLE3", speculative_draft_model_path=eagle3_path(a.eagle_head), **shape)
     elif arm == "eagle3_auto":
-        kw.update(speculative_algorithm="EAGLE3", speculative_draft_model_path=eagle3_path())
+        kw.update(speculative_algorithm="EAGLE3", speculative_draft_model_path=eagle3_path(a.eagle_head))
     elif arm != "plain":
         raise SystemExit(f"unknown arm {arm!r}; one of {ARMS}")
     return kw
@@ -124,6 +146,9 @@ def run(argv: list[str]) -> int:
     ap.add_argument("--out", required=True, help="results/<device>/<out>.csv")
     ap.add_argument("--max-running", type=int, required=True)
     ap.add_argument("--gamma", type=int, default=4, help="chain length of the aligned speculative arms")
+    ap.add_argument("--eagle-head", choices=sorted(EAGLE3_HEADS), default="tengyunw")
+    ap.add_argument("--tree", default=None, metavar="STEPS,TOPK,TOKENS",
+                    help="eagle3 arm: a tree shape instead of the chain of --gamma (e.g. 3,4,8)")
     ap.add_argument("--kv-pool-tokens", type=int, default=65536)
     ap.add_argument("--chunked-prefill-size", type=int, default=2048)
     ap.add_argument("--max-prefill-tokens", type=int, default=8192)
@@ -177,16 +202,16 @@ def run(argv: list[str]) -> int:
         rows, per_run_gpu = [], []
         for k in range(a.rounds):
             t_start = gpu.sample_now()
-            r = once(wl["prompts"], wl["output_lens"])
+            r = once(wl["prompts"], wl["output_lens"], stop=wl.get("throughput_stop_ids") or None)
             g = gpu.summary(since=t_start, until=gpu.sample_now())
             per_run_gpu.append(dict(run=k, arm=a.arm, **g))
-            r.pop("output_tokens")
             rows.append(dict(
-                run_id=run_id, run=k, arm=a.arm, engine="sglang", workload="unique", requests=len(wl["prompts"]),
-                prompt_tokens=sum(map(len, wl["prompts"])), output_tokens=sum(wl["output_lens"]),
+                run_id=run_id, run=k, arm=a.arm, engine="sglang", workload=wl["caliber"].get("workload", "unique"),
+                requests=len(wl["prompts"]), prompt_tokens=sum(map(len, wl["prompts"])),
                 kv_pool_tokens=a.kv_pool_tokens, max_running=a.max_running, **r,
                 spec_algorithm=eff["speculative_algorithm"] or "", spec_steps=eff["speculative_num_steps"] or "",
                 spec_topk=eff["speculative_eagle_topk"] or "", spec_draft_tokens=eff["speculative_num_draft_tokens"] or "",
+                draft_head=a.eagle_head if a.arm.startswith("eagle3") else "",
                 sm_mhz_mean=g["sm_mhz"]["mean"], sglang_version=sglang.__version__,
                 git_commit=env["git_commit"][:12],
             ))
@@ -228,7 +253,7 @@ def run(argv: list[str]) -> int:
     sidecar.write_sidecar(f"{results_dir}/{a.out}.{run_id}.sidecar.json", dict(
         run_id=run_id,
         config=dict(vars(a), caliber=wl["caliber"], engine_args={k: str(v) for k, v in kw.items()}, engine=eff,
-                    eagle3_head=EAGLE3_HEAD if a.arm.startswith("eagle3") else None),
+                    eagle3_head=EAGLE3_HEADS[a.eagle_head] if a.arm.startswith("eagle3") else None),
         environment=env, preflight=pre, warmup=warmup, gpu_during_runs=per_run_gpu,
     ))
     print(path)
