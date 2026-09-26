@@ -382,37 +382,12 @@ def main() -> int:
     with sidecar.GpuSampler() as gpu:
         # Warm-up by time: same workload shape, another seed, until the SM clock settles.
         warm = make_workload(args, seed=args.workload_seed + 1_000_003)
-        t_warm = time.monotonic()
-        warm_runs = 0
-        # Two ways to call the clock settled. The last few seconds of samples against the few
-        # before them, which is right for a short workload. And the mean clock of a whole
-        # warm-up run against the previous run of the same arm, for a workload whose phases
-        # swing the clock by more than the tolerance within a run (a large model's prefills
-        # hit the power cap, its decodes do not), so that no two short windows ever agree.
-        run_means: dict[str, float] = {}
-        settled_by = None
-        while True:
-            arm = arms[warm_runs % len(arms)]
-            set_arm(eng, arm)
-            t_run = gpu.sample_now()
-            run(eng, warm)
-            mean = gpu.summary(since=t_run, until=gpu.sample_now())["sm_mhz"]["mean"]
-            warm_runs += 1
-            elapsed = time.monotonic() - t_warm
-            if elapsed >= args.warmup_min_s:
-                if gpu.settled():
-                    settled_by = "window"
-                elif arm in run_means and abs(mean - run_means[arm]) <= 0.02 * mean:
-                    settled_by = "run"
-            if settled_by:
-                break
-            run_means[arm] = mean
-            if elapsed >= args.warmup_max_s:
-                print(f"SM clock not settled after {elapsed:.0f} s of warm-up", file=sys.stderr)
-                return 3
-        warmup = dict(
-            seconds=round(elapsed, 1), runs=warm_runs, settled_by=settled_by, gpu=gpu.summary(since=t_warm)
-        )
+        # Every arm is warmed, in rotation; the settling rule is the shared one (sidecar.warm_up).
+        warmup = sidecar.warm_up(gpu, lambda arm: run(eng, warm), args.warmup_min_s, args.warmup_max_s,
+                                 arms=arms, before=lambda arm: set_arm(eng, arm))
+        if not warmup["settled_by"]:
+            print(f"SM clock not settled after {warmup['seconds']:.0f} s of warm-up", file=sys.stderr)
+            return 3
 
         w = make_workload(args, seed=args.workload_seed)
         rows, per_run_gpu = [], []

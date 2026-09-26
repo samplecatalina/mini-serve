@@ -216,6 +216,50 @@ class GpuSampler:
         )
 
 
+def warm_up(gpu, run_once, min_s: float, max_s: float, arms=(None,), before=None,
+            tol: float = 0.02, clock=time.monotonic) -> dict:
+    """Run warm-up passes until the SM clock has settled; the one rule every harness uses.
+
+    Settled means either of two things, checked once ``min_s`` have passed:
+
+    - "window": the last few clock samples agree with the few before them
+      (``GpuSampler.settled``) -- right for a short workload;
+    - "run": this pass's mean clock is within ``tol`` of the previous pass of
+      the same arm -- for a workload whose phases swing the clock by more than
+      that within a pass (a large model's prefills hit the power cap and its
+      decodes do not), so that no two short windows ever agree.
+
+    ``arms`` rotate across passes (a harness that alternates settings warms all
+    of them); ``before(arm)`` runs ahead of each pass to switch to it;
+    ``run_once(arm)`` is one pass. Returns ``seconds``, ``runs``,
+    ``settled_by`` ("window", "run", or None when ``max_s`` ran out -- the
+    caller decides how to stop) and the clock summary since the start.
+    """
+    since = time.monotonic()  # the samplers' clock, for the summary
+    t0 = clock()
+    runs = 0
+    means: dict = {}
+    settled_by = None
+    while True:
+        arm = arms[runs % len(arms)]
+        if before is not None:
+            before(arm)
+        t_run = gpu.sample_now()
+        run_once(arm)
+        mean = gpu.summary(since=t_run, until=gpu.sample_now())["sm_mhz"]["mean"]
+        runs += 1
+        elapsed = clock() - t0
+        if elapsed >= min_s:
+            if gpu.settled():
+                settled_by = "window"
+            elif arm in means and abs(mean - means[arm]) <= tol * mean:
+                settled_by = "run"
+        if settled_by or elapsed >= max_s:
+            break
+        means[arm] = mean
+    return dict(seconds=round(elapsed, 1), runs=runs, settled_by=settled_by, gpu=gpu.summary(since=since))
+
+
 def harness_commit() -> tuple[str, bool]:
     """Which commit of this harness is running, and whether it was modified.
 

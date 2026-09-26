@@ -244,18 +244,11 @@ def run(argv: list[str]) -> int:
     env = sidecar.environment()
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     with sidecar.GpuSampler() as gpu:
-        t_warm = time.monotonic()
-        warm_runs = 0
-        while True:
-            once(wl["warm_prompts"], wl["warm_output_lens"])
-            warm_runs += 1
-            elapsed = time.monotonic() - t_warm
-            if elapsed >= a.warmup_min_s and gpu.settled():
-                break
-            if elapsed >= a.warmup_max_s:
-                print(f"SM clock not settled after {elapsed:.0f} s of warm-up", file=sys.stderr)
-                return 3
-        warmup = dict(seconds=round(elapsed, 1), runs=warm_runs, gpu=gpu.summary(since=t_warm))
+        warmup = sidecar.warm_up(gpu, lambda _: once(wl["warm_prompts"], wl["warm_output_lens"]),
+                                 a.warmup_min_s, a.warmup_max_s)
+        if not warmup["settled_by"]:
+            print(f"SM clock not settled after {warmup['seconds']:.0f} s of warm-up", file=sys.stderr)
+            return 3
 
         rows, per_run_gpu = [], []
         for k in range(a.rounds):
