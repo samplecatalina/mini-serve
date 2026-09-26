@@ -1,0 +1,7 @@
+metric,miniserve,minisgl,ratio
+output_tok_s,718.25,913.7,0.7861
+ttft_p50_ms,245.01,12.07,20.3075
+ttft_p95_ms,245.01,12.07,20.3075
+itl_p50_ms,10.21,8.73,1.1696
+itl_p99_ms,11.12,9.61,1.1572
+e2e_mean_ms,2851.45,2241.45,1.2721
