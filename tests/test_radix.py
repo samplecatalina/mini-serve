@@ -399,3 +399,44 @@ def test_randomized_interleaving(make, seed):
     assert kv.num_idle_blocks() == num_blocks
     kv.tree.clear()
     assert kv.allocator.num_free == num_blocks
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_order_by_cached_prefix_matches_sorting_by_prefix_len(make, seed):
+    """The cache-aware admission order: by the cached prefix of prompt + output (all but the last
+    token), longest first, ties in queue order. The C++ backend reads the two lists in place and
+    sorts in the same call; the answer must be the same element for element."""
+    from types import SimpleNamespace
+
+    rng = random.Random(seed)
+    t, a = _tree(make, num_blocks=256)
+    prefixes = [[rng.randrange(1, 9) for _ in range(BS * rng.randrange(1, 6))] for _ in range(6)]
+    for p in prefixes:
+        _cache(t, a, p + [rng.randrange(1, 9) for _ in range(BS * rng.randrange(0, 3))])
+    reqs = []
+    for k in range(60):
+        base = list(rng.choice(prefixes)) if rng.random() < 0.8 else []
+        prompt = base[: rng.randrange(0, len(base) + 1)] + [rng.randrange(1, 9) for _ in range(rng.randrange(1, 12))]
+        # Some requests carry output kept across a preemption, which splits the tokens in two lists.
+        output = [rng.randrange(1, 9) for _ in range(rng.randrange(0, 6))] if rng.random() < 0.3 else []
+        reqs.append(SimpleNamespace(rid=k, prompt_ids=prompt, output_ids=output))
+    want = sorted(reqs, key=lambda r: -t.prefix_len((r.prompt_ids + r.output_ids)[:-1]))
+    got = t.order_by_cached_prefix(reqs)
+    assert [r.rid for r in got] == [r.rid for r in want]
+    # The lookup changes nothing in the tree.
+    t.check_invariants()
+
+
+def test_order_by_cached_prefix_through_the_cache_manager(make):
+    from types import SimpleNamespace
+
+    t, a = _tree(make)
+    _cache(t, a, list(range(1, 9)))
+    kv = SimpleNamespace(tree=t)
+    reqs = [SimpleNamespace(rid=0, prompt_ids=[9, 9, 9, 9, 9], output_ids=[]),
+            SimpleNamespace(rid=1, prompt_ids=list(range(1, 10)), output_ids=[]),
+            SimpleNamespace(rid=2, prompt_ids=list(range(1, 5)), output_ids=[5, 6]),
+            SimpleNamespace(rid=3, prompt_ids=[1, 2, 3, 4, 7], output_ids=[])]
+    got = KVCacheManager.order_by_cached_prefix(kv, reqs)
+    # rid 1: 8 cached; rids 2 and 3: 4 each (queue order kept); rid 0: none.
+    assert [r.rid for r in got] == [1, 2, 3, 0]

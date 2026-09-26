@@ -64,6 +64,15 @@ struct ListTokens {
   }
 };
 
+// Two Python lists read as one sequence (a request's prompt followed by its output),
+// in place, without building the concatenation.
+struct PairListTokens {
+  ListTokens head, tail;
+  std::size_t n;
+  std::size_t size() const { return n; }
+  Token operator[](std::size_t i) const { return i < head.n ? head[i] : tail[i - head.n]; }
+};
+
 // Call f with the first `limit` tokens of `seq` (all of them if limit < 0): read in place
 // from a list, converted once from any other sequence.
 template <class F>
@@ -218,6 +227,42 @@ PYBIND11_MODULE(_minicore, m) {
           },
           py::arg("seqs"), py::arg("limits"),
           "prefix_len of seqs[i][:limits[i]] for every i, in one call across the binding.")
+      .def(
+          "order_by_cached_prefix",
+          [](const RadixTree& t, const py::sequence& reqs) {
+            // Built once per call, not once per request. (Not static: a Python object that
+            // outlives the interpreter is destroyed after it, at exit.)
+            const py::str prompt_attr("prompt_ids"), output_attr("output_ids");
+            const std::size_t n = static_cast<std::size_t>(py::len(reqs));
+            std::vector<py::object> items(n);
+            std::vector<int> lens(n);
+            for (std::size_t i = 0; i < n; ++i) {
+              items[i] = reqs[i];
+              py::object prompt = items[i].attr(prompt_attr), output = items[i].attr(output_attr);
+              if (PyList_Check(prompt.ptr()) && PyList_Check(output.ptr())) {
+                const std::size_t np = static_cast<std::size_t>(PyList_GET_SIZE(prompt.ptr()));
+                const std::size_t no = static_cast<std::size_t>(PyList_GET_SIZE(output.ptr()));
+                const std::size_t total = np + no;
+                // Leave the last token to compute: its logits are needed (seq_len - 1).
+                const std::size_t limit = total == 0 ? 0 : total - 1;
+                PairListTokens tok{{prompt.ptr(), std::min(np, limit)}, {output.ptr(), no}, limit};
+                lens[i] = t.prefix_len(tok);
+              } else {
+                auto v = prompt.cast<std::vector<Token>>();
+                auto o = output.cast<std::vector<Token>>();
+                v.insert(v.end(), o.begin(), o.end());
+                if (!v.empty()) v.pop_back();
+                lens[i] = t.prefix_len(minicore::span_of(v));
+              }
+            }
+            py::list out(n);
+            const auto order = minicore::order_by_prefix_lens(lens);
+            for (std::size_t k = 0; k < n; ++k) out[k] = items[order[k]];
+            return out;
+          },
+          py::arg("reqs"),
+          "reqs ordered by the cached prefix of prompt_ids + output_ids (all but the last token), "
+          "longest first; ties keep their order.")
       .def(
           "insert",
           [](RadixTree& t, const py::handle& tokens, const std::vector<minicore::BlockId>& blocks) {

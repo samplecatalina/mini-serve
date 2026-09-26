@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -252,5 +253,15 @@ struct TokenSpan {
 };
 
 inline TokenSpan span_of(const std::vector<Token>& v) { return {v.data(), v.size()}; }
+
+// Positions 0..n-1 ordered by lens[i], longest first; equal lengths keep their input
+// order (a waiting queue ordered by cached prefix stays first-come-first-served among
+// requests that share one).
+inline std::vector<std::size_t> order_by_prefix_lens(const std::vector<int>& lens) {
+  std::vector<std::size_t> idx(lens.size());
+  for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+  std::stable_sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) { return lens[a] > lens[b]; });
+  return idx;
+}
 
 }  // namespace minicore

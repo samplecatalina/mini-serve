@@ -94,6 +94,18 @@ class RadixTree:
             raise ValueError("prefix_lens: one limit per sequence")
         return [self._prefix_len(s, min(n, len(s))) for s, n in zip(seqs, limits)]
 
+    def order_by_cached_prefix(self, reqs: Sequence) -> list:
+        """``reqs`` ordered by the cached prefix of ``prompt_ids + output_ids`` (all but the last
+        token, whose logits a prefill must compute), longest first; ties keep their order.
+
+        Takes the requests themselves rather than their token lists so that the C++ backend can
+        read the two lists in place and sort in the same call: for a queue of a thousand, building
+        the lists and sorting in Python cost more than the tree walk (M6.3)."""
+        seqs = [r.prompt_ids if not r.output_ids else r.prompt_ids + r.output_ids for r in reqs]
+        lens = self.prefix_lens(seqs, [max(len(s) - 1, 0) for s in seqs])
+        order = sorted(range(len(reqs)), key=lambda i: -lens[i])
+        return [reqs[i] for i in order]
+
     def _prefix_len(self, tokens: Sequence[int], n: int) -> int:
         bs = self.block_size
         limit = n // bs * bs

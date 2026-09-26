@@ -78,6 +78,13 @@ class KVCacheManager:
         seqs = [r.prompt_ids if not r.output_ids else r.prompt_ids + r.output_ids for r in reqs]
         return self.tree.prefix_lens(seqs, [r.seq_len - 1 for r in reqs])
 
+    def order_by_cached_prefix(self, reqs) -> list:
+        """``reqs`` by cached prefix, longest first, ties in their order (the cache-aware policy's
+        admission order), in one call to the tree."""
+        if self.tree is None:
+            return list(reqs)
+        return self.tree.order_by_cached_prefix(reqs)
+
     def abandon(self, req) -> None:
         """Undo ``acquire``: nothing was computed, nothing is inserted."""
         if req.cache_node is not None:

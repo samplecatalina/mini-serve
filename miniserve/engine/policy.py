@@ -74,8 +74,7 @@ class CacheAware:
     def order(self, waiting: Sequence[Request], kv) -> list[Request]:
         if kv is None or not kv.radix:
             return list(waiting)
-        cached = dict(zip((r.rid for r in waiting), kv.cached_prefix_lens(waiting)))
-        return sorted(waiting, key=lambda r: -cached[r.rid])
+        return kv.order_by_cached_prefix(waiting)
 
     def pick_victim(self, candidates: Sequence[Request]) -> Request:
         return candidates[-1]

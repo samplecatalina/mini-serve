@@ -167,3 +167,10 @@ TEST(RadixTree, IndexedEvictionMatchesFullWalk) {
     }
   }
 }
+
+TEST(RadixTree, OrderByPrefixLensIsStableAndLongestFirst) {
+  const std::vector<int> lens{16, 0, 32, 16, 0, 32};
+  const auto order = minicore::order_by_prefix_lens(lens);
+  EXPECT_EQ(order, (std::vector<std::size_t>{2, 5, 0, 3, 1, 4}));
+  EXPECT_TRUE(minicore::order_by_prefix_lens({}).empty());
+}
