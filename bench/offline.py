@@ -147,7 +147,7 @@ def make_workload(args, seed: int) -> Workload:
     (``--output-len`` is only the cap): requests finish early, at lengths nobody knows in advance.
     ``mtbench``: the 80 MT-Bench first-turn questions (``bench/mtbench.py``) in the chat format,
     stopping at the end of the answer -- natural text for speculative decoding, whose acceptance
-    random tokens understate on a large target."""
+    on random tokens depends on the random set."""
     rng = random.Random(seed)
     n = args.groups * args.per_group
 

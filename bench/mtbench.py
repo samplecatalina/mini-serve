@@ -1,9 +1,9 @@
 """MT-Bench first-turn questions, the natural-text prompt set for speculative decoding.
 
-Random token prompts understate speculation on a large target: after a random prefix the
-target does not degrade and the small draft cannot guess it (acceptance at gamma 4, Qwen3-8B
-with a 0.6B draft: 0.431 on random prompts, 0.561 on natural text). MT-Bench is what
-speculative decoding work usually reports on: 80 questions, ten in each of eight categories
+Acceptance on random token prompts is not a stable quantity on a large target: two random
+sets of the same shape gave 0.431 and 0.54-0.68 at gamma 4 (Qwen3-8B with a 0.6B draft), so a
+throughput figure for speculative decoding needs a natural-text workload next to the random
+one (on this one: 0.47-0.54). MT-Bench is what speculative decoding work usually reports on: 80 questions, ten in each of eight categories
 (writing, roleplay, reasoning, math, coding, extraction, STEM, humanities).
 
 Pinned: HuggingFaceH4/mt_bench_prompts (Apache-2.0) at the revision below, file
