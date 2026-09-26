@@ -89,6 +89,28 @@ CHAT_TOPICS = (
 )
 
 
+def mtbench_prompts(model: str, n: int, rng: random.Random) -> tuple[list[list[int]], frozenset[int]]:
+    """``n`` MT-Bench first-turn questions in the model's chat format (thinking off), shuffled;
+    past 80 the shuffled list repeats. Stops at the end-of-turn token, like ``chat``."""
+    from transformers import AutoTokenizer
+
+    from bench import mtbench
+    from miniserve.model.weights import model_path, spec_for
+
+    tok = AutoTokenizer.from_pretrained(str(model_path(spec_for(model), download=False)))
+    qs = mtbench.questions()
+    rng.shuffle(qs)
+    prompts = [
+        tok.apply_chat_template([{"role": "user", "content": qs[k % len(qs)]}], add_generation_prompt=True,
+                                enable_thinking=False, tokenize=True, return_dict=False)
+        for k in range(n)
+    ]
+    end = tok.convert_tokens_to_ids("<|im_end|>")
+    if end != tok.eos_token_id:
+        raise SystemExit(f"end of turn {end} is not the tokenizer's eos {tok.eos_token_id}")
+    return prompts, frozenset({end})
+
+
 def chat_prompts(model: str, n: int, rng: random.Random) -> tuple[list[list[int]], frozenset[int]]:
     """``n`` of the template x topic questions in the model's chat format, and the token that ends
     an answer. Only the end-of-turn token: the blueprint stops on its tokenizer's single
@@ -122,7 +144,10 @@ def make_workload(args, seed: int) -> Workload:
     ``--long-fraction`` of them) ``--long-output-len`` tokens: prefix sharing for a cache-aware
     order to exploit, and a spread of job sizes for shortest-job-first. ``chat``: natural
     short-answer questions in the model's chat format, each stopping at the end of its answer
-    (``--output-len`` is only the cap): requests finish early, at lengths nobody knows in advance."""
+    (``--output-len`` is only the cap): requests finish early, at lengths nobody knows in advance.
+    ``mtbench``: the 80 MT-Bench first-turn questions (``bench/mtbench.py``) in the chat format,
+    stopping at the end of the answer -- natural text for speculative decoding, whose acceptance
+    random tokens understate on a large target."""
     rng = random.Random(seed)
     n = args.groups * args.per_group
 
@@ -151,6 +176,8 @@ def make_workload(args, seed: int) -> Workload:
         output_lens = [args.long_output_len if lg else args.output_len for lg in long]
     elif args.workload == "chat":
         prompts, stop_ids = chat_prompts(args.model, n, rng)
+    elif args.workload == "mtbench":
+        prompts, stop_ids = mtbench_prompts(args.model, n, rng)
     else:
         raise ValueError(args.workload)
     if args.arrival_rate > 0:
@@ -327,7 +354,7 @@ def main() -> int:
     add_spec_args(ap)
     g = ap.add_argument_group("benchmark")
     g.add_argument("--model", default="0.6B", help="target model: a pinned size (0.6B, 1.7B, 8B)")
-    g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy", "chat"], required=True)
+    g.add_argument("--workload", choices=["shared", "unique", "mixed", "policy", "chat", "mtbench"], required=True)
     g.add_argument("--groups", type=int, default=8)
     g.add_argument("--per-group", type=int, default=8)
     g.add_argument("--prefix-len", type=int, default=1024)
