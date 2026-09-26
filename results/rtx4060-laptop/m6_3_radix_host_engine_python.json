@@ -1,0 +1,214 @@
+{
+ "workloads": {
+  "many_small/cache": {
+   "config": {
+    "workload": "shared",
+    "groups": 64,
+    "per_group": 16,
+    "prefix_len": 256,
+    "suffix_len": 16,
+    "output_len": 32,
+    "pool": 32768
+   },
+   "policy": "cache",
+   "reps": [
+    {
+     "steps": 531,
+     "wall_s": 7.702,
+     "output_tok_s": 4255.1,
+     "engine_step_total_ms": 7671.1,
+     "radix_share_of_step": 0.03678,
+     "max_nodes": 1342,
+     "max_cached_blocks": 2015,
+     "ops": {
+      "engine.step": {
+       "calls": 531,
+       "total_ms": 7671.08,
+       "per_step_ms": 14.4465
+      },
+      "kv.acquire": {
+       "calls": 1024,
+       "total_ms": 9.927,
+       "per_step_ms": 0.0187
+      },
+      "kv.commit": {
+       "calls": 2053,
+       "total_ms": 22.159,
+       "per_step_ms": 0.0417
+      },
+      "kv.order_by_cached_prefix": {
+       "calls": 531,
+       "total_ms": 226.224,
+       "per_step_ms": 0.426
+      },
+      "kv.release": {
+       "calls": 1024,
+       "total_ms": 15.759,
+       "per_step_ms": 0.0297
+      },
+      "kv.reserve": {
+       "calls": 530,
+       "total_ms": 19.015,
+       "per_step_ms": 0.0358
+      },
+      "policy.order[cache]": {
+       "calls": 531,
+       "total_ms": 226.817,
+       "per_step_ms": 0.4271
+      },
+      "radix_total": {
+       "calls": 0,
+       "total_ms": 282.119,
+       "per_step_ms": 0.5313
+      },
+      "scheduler.schedule": {
+       "calls": 531,
+       "total_ms": 273.527,
+       "per_step_ms": 0.5151
+      },
+      "tree.evict": {
+       "calls": 47,
+       "total_ms": 18.457,
+       "per_step_ms": 0.0348
+      },
+      "tree.insert": {
+       "calls": 2053,
+       "total_ms": 14.578,
+       "per_step_ms": 0.0275
+      },
+      "tree.lock": {
+       "calls": 3077,
+       "total_ms": 0.885,
+       "per_step_ms": 0.0017
+      },
+      "tree.match": {
+       "calls": 1024,
+       "total_ms": 4.964,
+       "per_step_ms": 0.0093
+      },
+      "tree.order_by_cached_prefix": {
+       "calls": 531,
+       "total_ms": 225.757,
+       "per_step_ms": 0.4252
+      },
+      "tree.prefix_lens": {
+       "calls": 531,
+       "total_ms": 169.392,
+       "per_step_ms": 0.319
+      },
+      "tree.unlock": {
+       "calls": 3077,
+       "total_ms": 0.776,
+       "per_step_ms": 0.0015
+      }
+     }
+    },
+    {
+     "steps": 531,
+     "wall_s": 7.608,
+     "output_tok_s": 4308.0,
+     "engine_step_total_ms": 7577.4,
+     "radix_share_of_step": 0.03667,
+     "max_nodes": 1311,
+     "max_cached_blocks": 1999,
+     "ops": {
+      "engine.step": {
+       "calls": 531,
+       "total_ms": 7577.35,
+       "per_step_ms": 14.27
+      },
+      "kv.acquire": {
+       "calls": 1024,
+       "total_ms": 10.475,
+       "per_step_ms": 0.0197
+      },
+      "kv.commit": {
+       "calls": 2053,
+       "total_ms": 21.992,
+       "per_step_ms": 0.0414
+      },
+      "kv.order_by_cached_prefix": {
+       "calls": 531,
+       "total_ms": 222.59,
+       "per_step_ms": 0.4192
+      },
+      "kv.release": {
+       "calls": 1024,
+       "total_ms": 15.94,
+       "per_step_ms": 0.03
+      },
+      "kv.reserve": {
+       "calls": 530,
+       "total_ms": 17.985,
+       "per_step_ms": 0.0339
+      },
+      "policy.order[cache]": {
+       "calls": 531,
+       "total_ms": 223.169,
+       "per_step_ms": 0.4203
+      },
+      "radix_total": {
+       "calls": 0,
+       "total_ms": 277.859,
+       "per_step_ms": 0.5233
+      },
+      "scheduler.schedule": {
+       "calls": 531,
+       "total_ms": 270.173,
+       "per_step_ms": 0.5088
+      },
+      "tree.evict": {
+       "calls": 47,
+       "total_ms": 20.019,
+       "per_step_ms": 0.0377
+      },
+      "tree.insert": {
+       "calls": 2053,
+       "total_ms": 14.39,
+       "per_step_ms": 0.0271
+      },
+      "tree.lock": {
+       "calls": 3077,
+       "total_ms": 0.881,
+       "per_step_ms": 0.0017
+      },
+      "tree.match": {
+       "calls": 1024,
+       "total_ms": 5.153,
+       "per_step_ms": 0.0097
+      },
+      "tree.order_by_cached_prefix": {
+       "calls": 531,
+       "total_ms": 222.138,
+       "per_step_ms": 0.4183
+      },
+      "tree.prefix_lens": {
+       "calls": 531,
+       "total_ms": 167.643,
+       "per_step_ms": 0.3157
+      },
+      "tree.unlock": {
+       "calls": 3077,
+       "total_ms": 0.768,
+       "per_step_ms": 0.0014
+      }
+     }
+    }
+   ]
+  }
+ },
+ "git_commit": "4b5d5dbaff50ad4fda777b06aad3061bfd940310",
+ "argv": [
+  "engine",
+  "--block-backend",
+  "python",
+  "--workloads",
+  "many_small",
+  "--policies",
+  "cache",
+  "--reps",
+  "2",
+  "--out",
+  "results/rtx4060-laptop/m6_3_radix_host_engine_python.json"
+ ]
+}
