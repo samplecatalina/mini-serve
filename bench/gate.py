@@ -179,6 +179,15 @@ def judge(arm: str, sides: dict, recorded: dict | None = None) -> tuple[str, str
     return "pass", f"{arm}: ok  {delta}{drift}"
 
 
+def uncommitted() -> bool:
+    """Tracked files differ from HEAD. Checked before anything runs: the
+    reference goes first, and a refusal after its first process would cost a
+    minute to say what one command can."""
+    out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                         capture_output=True, text=True, check=True).stdout
+    return bool(out.strip())
+
+
 def host_state() -> str:
     raw = os.environ.get("MINISERVE_HOST_POWER")
     return raw if raw else "(not recorded)"
@@ -236,6 +245,9 @@ def main() -> int:
                   file=sys.stderr)
             return 2
     ref_commit = base.get("reference_commit") or base["arms"]["unique"]["commit"]
+    if not args.allow_dirty and uncommitted():
+        print("gate: the working tree has uncommitted changes; commit them first", file=sys.stderr)
+        return 2
 
     t0 = time.monotonic()
     verdicts = {}

@@ -127,3 +127,21 @@ def test_the_caliber_is_fixed_not_taken_from_the_command_line():
     src = inspect.getsource(gate.main)
     for flag in ("--workload", "--rounds", "--groups", "--output-len", "--prefix-len"):
         assert f'"{flag}"' not in src, f"{flag} must not be settable on the gate"
+
+
+def test_uncommitted_changes_are_refused_before_anything_runs(monkeypatch, tmp_path):
+    import json
+
+    base = {"device": "dev", "tolerance": gate.TOLERANCE, "reference_commit": "abc",
+            "arms": {arm: process(3500.0) | {"args": gate.ARMS[arm]} for arm in gate.ARMS}}
+    path = tmp_path / "gate_baseline.json"
+    path.write_text(json.dumps(base))
+
+    class Profile:
+        results_dir = str(tmp_path)
+
+    monkeypatch.setattr(gate.sidecar, "device_profile", lambda: ("dev", Profile()))
+    monkeypatch.setattr(gate, "uncommitted", lambda: True)
+    monkeypatch.setattr(gate, "checkout", lambda *a: pytest.fail("nothing may run on dirty code"))
+    monkeypatch.setattr(gate.sys, "argv", ["gate"])
+    assert gate.main() == 2
