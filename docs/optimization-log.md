@@ -179,7 +179,7 @@ path; that anchor runs on both the single-request and the concurrent path.
 | A first version without graphs, 1.7B target / 0.6B draft, γ=4, eight sequences kept running. | 0.7–0.9× of the non-speculative path. | **0.99×** against the same path without speculation, **0.84×** against the default engine (graphs and overlap on); time to first token **+56%**. Decode alone: **+9.4%**. | The four numbers only mean something together: speculation won 9.4% on decode and the path gave up 15% by leaving graphs and overlap behind; the draft prefilled one request at a time. Also: with eight requests arriving at once, 0.77× — because speculation finishes requests sooner, the queue drains and the batch it forms is smaller (5.15 vs 7.21). Concurrency is not the batch the engine forms. | `results/rtx4060-laptop/m5_3_spec_saturated.csv`, `m5_3_baseline.csv` |
 | Capturing the verification step in CUDA Graphs (bucketed by batch) and batching the draft's prefill removes most of the eager cost. | A round 71.0 → 50–58 ms; graphs on / off ≥ 1.2× in one process. | Round **57.80 ms**; graphs on / off **1.205×** in one process; first-token regression **+56% → +15%**. | At the top of the range. The round is now GPU-bound: the host waits in the readback. With a cheaper round **the best γ moves from 4 to 2** — a shorter γ wastes less when acceptance decays with it (0.81 / 0.70 / 0.62). | `results/rtx4060-laptop/m5_4_spec_saturated.csv`, `m5_4_round_graph.csv`, `m5_4_spec.csv`, `profiling/rtx4060-laptop/m5_4_round_{before,after}.nsys-rep` |
 | At 8B / 0.6B on the L40S the draft costs 7.5% of the target by parameters, so speculation pays at small batches and loses at large ones. Caps 1–64, random 512-token prompts. | Batch 1: 1.3–1.8×. Batch 8, γ=4: a round at 70–90% of its bandwidth floor. | Against the default engine: **1.97× at 1**, 1.37× at 8, 1.03× at 32, **0.95× at 64** (best γ each). The crossover is between 32 and 64. A round at batch 8 reaches **62%** of its floor. | The draft does not cost 7.5%: on 142 SMs a 0.6B step at batch 8 is latency-bound, **5.2 ms against a 1.83 ms floor**, and the draft takes 44% of a round. Its real cost is the ratio of step times under a latency floor, not of parameters. The crossover depends on how full the batch stays, not only on where verification runs out of compute. | `results/l40s/m5_5_spec.csv`, `m5_5_baseline.csv`, `profiling/l40s/m5_5_round.nsys-rep` |
-| Random prompts are neutral for acceptance. | Random ≥ natural text (it was, on 1.7B). | At γ=4: natural text **0.561**, random **0.431**; self-draft 0.994. | Reversed on 8B: after a random prefix the large model does not degrade and the small one cannot guess it. **The throughput figures above use random prompts and therefore understate speculation.** | `results/l40s/m5_5_alpha.csv` |
+| Random prompts are neutral for acceptance. | Random ≥ natural text (it was, on 1.7B). | At γ=4: natural text **0.561**, random **0.431**; self-draft 0.994. | Reversed on 8B: after a random prefix the large model does not degrade and the small one cannot guess it. **The throughput figures above use random prompts and therefore understate speculation.** *Corrected under M6: the throughput sweep's own random prompts reach 0.54–0.68 at γ=4, above the 0.431 here, so this does not hold for the sweep; see "Speculation on natural text" below.* | `results/l40s/m5_5_alpha.csv` |
 | Against sglang 0.5.10 in the same job on the same token ids: its two-model path (same algorithm) and EAGLE-3 with the public `Tengyunw/qwen3_8b_eagle3` head (chain of 4), each against its own engine's plain path. | Same acceptance for the two two-model paths (±5%); EAGLE-3 faster than both from cap 8 up. | Speedup at caps 1 / 8 / 64 — this engine two-model **1.96 / 1.36 / 0.91×**; sglang two-model **2.07 / 1.49 / 0.97×**; sglang EAGLE-3 **1.50 / 1.08 / 0.89×**. Tokens per round (random): two-model 3.13–3.66, EAGLE-3 1.80–2.16; natural text 3.07 vs 2.10. sglang's plain path is 1.06–1.22× this engine's. | Acceptance matched; the EAGLE-3 prediction was wrong in direction. This head, in a chain shape, emits about 1.4 fewer tokens per round than the same-family 0.6B draft, and a one-layer draft does not buy that back. **Same algorithm, same acceptance, sglang is 13–29% faster** — the gap is per-round cost, mostly the draft's steps. Scope: one head, chain shape only; tree verification and other heads were not measured. sglang's two-model path failed at caps 2 and 4 (it concatenates the target's and the draft's hidden states when merging a running batch with a new one); those cells are empty. | `results/l40s/m5_6_{ours,ours_spec,sglang,sglang_accept}.csv` |
 
 ### Overlap across three platforms
@@ -220,3 +220,77 @@ Tree-shaped verification for EAGLE-3 and other draft heads; speculative throughp
 (expected to be higher than the random-prompt figures above, by an amount not yet measured); a draft whose
 several steps replay as one graph; an alternated test of the two prefix-tree backends under eviction pressure
 on the L40S.
+All four were taken up in M6, below.
+
+## M6 — Follow-ups: measurement tooling, the C++ core under eviction, where speculation's time goes
+
+The seven items of open work left at `v1.0`. Two are tooling and have acceptance criteria instead of
+predictions; the other five were predicted before they were measured, as before. Cluster figures come from
+three jobs on the same L40S node type (Xeon 6740E host); the two speculative-decoding jobs share rows, which
+reproduce to the identical tokens per round and within 1% throughput.
+
+### Measurement tooling
+
+- **The regression check compares within one session.** Against a number recorded earlier, unchanged code
+  had read −3.6% on one day and up to +3.1% on others, more than half the 5% threshold (`results/rtx4060-laptop/m5_2_gate_drift_*.csv`).
+  `make gate` now checks the baseline's commit out into a temporary worktree and runs reference, current,
+  current, reference in four processes, comparing the medians of all runs; when the two reference processes
+  disagree by more than 2.5% the verdict is "inconclusive" instead of pass or fail. It refuses to start on
+  uncommitted changes, and it catches a regression injected as extra GPU time per step (`bench/gate.py`,
+  `tests/test_gate.py`). The baseline now records its commit (`results/rtx4060-laptop/gate_baseline.json`).
+- **One warm-up rule.** The rule that ends warm-up (SM clock settled, by window or by whole run) had three
+  copies in three harnesses; one copy falling behind had cost a whole cluster job. It is now one function
+  (`bench/sidecar.py`, `warm_up`) with tests for both criteria and the timeout; the regression check passed
+  across the change.
+
+### The C++ core under eviction pressure
+
+| Hypothesis | Prediction | Measured | Difference | Evidence |
+|---|---|---|---|---|
+| With the C++ tree, the rest of cache-aware admission's cost is assembling the query and sorting on the Python side; moving the whole "query and sort" into one call removes it. 1,024 waiting requests. | Development host 0.198 → 0.10–0.15 ms per step; L40S node 1.17 → 0.5–0.8 ms; end to end ±1.5% on the development GPU. | **0.116 ms** and **0.61 ms**; the Python backend 0.424 ms (development host). End to end 4,242.5 vs 4,243.9 tok/s, all twelve runs scheduling identically. | Halved on both hosts, as predicted, and not visible end to end on the development GPU: the step is GPU-bound there. | `results/rtx4060-laptop/m6_3_radix_host_engine_{python,cpp}.json`, `m6_3_block_backend_cache.csv`, `results/l40s/m5_7_radix_host_engine_cpp.json` (before), `results/l40s/m6_7_radix_host_cpp.json` (after) |
+| The one configuration where the C++ tree had shown a signal (unalternated runs) is a real end-to-end gain: cache-aware admission, 4,096 requests waiting, 786k unique prompt tokens through a 335k-token pool so the tree evicts every step. Python / C++ before the ordering change / C++, A B C C B A in one job. | C++ over Python +1–6%; the ordering change +0–2% on top. | **+8.6%** (7,768.3 vs 7,154.5 tok/s): +8.0% from the tree, +0.55% from the ordering. All twelve runs schedule identically. One eviction: 1.2 ms (Python) vs 13 µs (C++). | Larger than predicted, and the first end-to-end gain of the core. It needs three things at once: a hot tree (eviction every step), a host with slow cores, and host time that is not hidden — this workload has 531 mixed prefill-and-decode steps, which run eagerly, against 33 decode-only steps. With first-come-first-served admission and little eviction the same core measured 0% (M5), and that stays the default configuration, so the Python reference remains the default backend; `--block-backend cpp` is the choice for cache-aware admission with a long queue. | `results/l40s/m6_7_radix.csv`, `m6_7_radix_host_{python,cpp}.json`, `results/l40s/m5_7_block_backend.csv` |
+
+### Where a speculative round's time goes
+
+The planned change was to replay the draft's proposal steps as one CUDA Graph. Its first step was to check
+how much time the GPU sits idle between those steps: 0.7% of the draft's time on the L40S and 1.9% on the
+development GPU (`profiling/l40s/m5_5_round.nsys-rep`, `profiling/rtx4060-laptop/m5_4_round_after.nsys-rep`). A graph cannot remove what is not there, so the item became an attribution:
+what a draft step consists of, and where sglang's 13–29% lead on the same algorithm comes from.
+
+| Hypothesis | Prediction | Measured | Difference | Evidence |
+|---|---|---|---|---|
+| A 0.6B decode step at batch 8 is mostly GEMM, with a few small kernels per layer. Development GPU, node-level graph trace. | GEMM 60–75% of kernel time; 250–400 kernels; non-GEMM kernels 5–15 µs each on average. | GEMM 63.9%; **1,613 kernels**; non-GEMM **1.3 µs** each. | Off by 4× in count. The engine runs the reference model's operators, the ones that keep its prefill logits bitwise equal to transformers: RMSNorm, rotary embedding, SiLU-and-multiply, residual adds and dtype casts are each several PyTorch primitives, about 49 kernels per layer. | `profiling/rtx4060-laptop/m6_4_draft_nodes.nsys-rep`, `m6_4_ours_decode8_nodes.nsys-rep` |
+| The blueprint's step on the same GPU is within ±10% of this engine's. | ±10%. | Blueprint **8.38 ms** / 368 kernels vs **10.22 ms** / 1,613. | The blueprint uses FlashInfer's fused norm, rotary and activation kernels; the whole 17% is there (GEMM 5.37 vs 5.43 ms, attention 2.64 vs 2.60 ms). | `results/rtx4060-laptop/m6_4_decode8_compare.csv`, `profiling/rtx4060-laptop/m6_4_{ours,blueprint}_decode8_nodes.nsys-rep` |
+| On the L40S, sglang's 0.6B step at batch 8 has ≥30% fewer kernels and runs at 0.6–0.85 of this engine's. | As stated; its GEMM time within ±15%. | **3.31 vs 5.43 ms** (0.610), **396 vs 1,641 kernels** (−76%), GEMM 2.07 vs 2.39 ms (−13.4%). | Of the 2.12 ms difference, 82% is unfused elementwise work (1.72 ms across 1,360 kernels of about 1.5 µs) and 15% separate Q/K/V and gate/up GEMMs, which sglang runs as one each. From the 4060 to the L40S, GEMM time falls 5.43 → 2.39 ms and the elementwise time rises 1.84 → 2.02 ms: these kernels are bound by launch latency, so a larger GPU makes them a larger share (19% → 38%). | `profiling/l40s/m6_4_{ours,sglang}_0.6B_decode8_nodes.nsys-rep` |
+| The draft's steps account for 40–80% of sglang's lead on a speculative round. 8B / 0.6B, γ=4, cap 8. | 40–80%. | **65%** from the four draft passes, 29% from verification (8B step 0.873 of this engine's), 6% the rest. | The lead is about 94% in the model's forward kernels — not scheduling, graphs or the host. The next step for speculation is therefore fused operators on the engine path, not a draft graph. A second, smaller source: this engine's round leaves the GPU idle 14% of the time, since the speculative path has no overlap. | `profiling/l40s/m6_4_ours_spec_round_nodes.nsys-rep`, `m6_4_{ours,sglang}_8B_decode8_nodes.nsys-rep` |
+
+### Speculation on natural text
+
+A natural-text workload next to the random one: the first turn of the 80 MT-Bench questions
+(`HuggingFaceH4/mt_bench_prompts` at `e3a795c5`), chat template, stopping at the end of the answer, throughput
+from the tokens actually produced (`bench/mtbench.py`). Both engines consume the same token ids.
+
+| Hypothesis | Prediction | Measured | Difference | Evidence |
+|---|---|---|---|---|
+| Random prompts understate acceptance on the 8B target (M5), so MT-Bench raises both acceptance and speedup. Caps 1–64. | Acceptance at γ=4 0.52–0.62; best-γ speedup 2.1–2.5× at cap 1, 1.45–1.7× at 8, 1.0–1.15× at 64. | Acceptance **0.466–0.544**; **1.73×** at 1, 1.45× at 8, 1.15× at 32, **1.02×** at 64. | The premise was wrong. The sweep's own random prompts accept 0.54–0.68 — higher than MT-Bench — while another random set of the same shape accepted 0.431: acceptance on random tokens is not a stable quantity. Speedup is not one-directional either: lower than random at cap 1 (1.73 vs 1.97), higher from cap 4 up (1.41 vs 1.18 at 16), with prompt length (about 107 vs 512 tokens) and stopping rule both differing. Both workloads are now reported, and acceptance is compared only within one workload. | `results/l40s/m6_5_mtbench_{ours,ours_spec}.csv`, `results/l40s/m5_5_{spec,alpha}.csv` |
+| The same-family two-model path stays ahead of the public EAGLE-3 head on natural text, as on random prompts. sglang 0.5.10, chain shapes. | Two-model faster at every cap. | EAGLE-3 is **6–17% faster** at every cap (1.97× → 1.29× over sglang's default, against 1.78× → 1.09×). Tokens per round 2.60–2.84 against 2.85–3.09. | On random prompts the head emits 1.3–1.5 fewer tokens per round than the 0.6B draft; on MT-Bench only 0.2–0.3 fewer, and a one-layer draft is much cheaper than four 0.6B passes. The head was trained on English chat, which MT-Bench is. | `results/l40s/m6_5_mtbench_sglang.csv`, `results/l40s/m5_6_sglang.csv` |
+| Development GPU, 1.7B / 0.6B, cap 8. | Acceptance at γ=4 0.58–0.70; 0.85–1.00× the default engine. | 0.579; **1.07×** (γ=2 1.16×). | Speculation now pays on the 4060 on natural text, where on random prompts γ=4 was 0.94×. | `results/rtx4060-laptop/m6_5_mtbench_{spec,baseline}.csv` |
+
+### EAGLE-3 with tree verification, and a second head
+
+Measured inside sglang 0.5.10 on MT-Bench (this engine verifies chains only). Three shapes (steps, top-k,
+tokens verified per round), chosen before the run and not searched: (4,1,5), the chain used so far; (3,4,8);
+(5,8,32), the example in sglang's documentation. Two heads: `Tengyunw/qwen3_8b_eagle3` at `2a1059d`, and
+`AngelSlim/Qwen3-8B_eagle3` at `9629dfce`.
+
+| Hypothesis | Prediction | Measured | Difference | Evidence |
+|---|---|---|---|---|
+| A tree raises tokens per round over the chain. Tengyunw head. | (3,4,8) +0.4–0.9; (5,8,32) +0.8–1.5 at cap 1. | (3,4,8) **+0.21 / +0.30 / +0.29** at caps 1 / 8 / 32; (5,8,32) **+1.33** at cap 1 (4.17 against 2.84). | (3,4,8) is one step shallower than the chain: at most 3 drafted tokens plus one per round, against 4 plus one. The width it adds is mostly spent recovering the lost depth. Depth and width have to be read together. | `results/l40s/m6_6_eagle3.csv` |
+| With a tree, EAGLE-3 closes most of its gap to the two-model path. Cap 1. | Best EAGLE-3 shape 1.8–2.4× over sglang's default, within ±15% of the two-model path. | **2.59×**, **1.445×** the two-model path (1.79×). At caps 8 / 32 the best shape is 2.03× / 1.65×, 1.32× / 1.24× the two-model path. | There was no gap to close on this workload (the chain was already ahead, above), and at cap 1 the tree is nearly free: a round takes 34.7 ms with 32 tokens verified against 30.9 ms with 5, because verification at batch 1 is bound by reading the weights. The 1.3 extra tokens per round cost almost nothing. | `results/l40s/m6_6_eagle3.csv` |
+| At cap 32 the largest tree runs out of compute. | (5,8,32) at or below 1.0×, and below the chain with the same head. | Tengyunw **1.05×**, AngelSlim **0.77×**; the chains 1.54× and 1.18×. | 32 × 32 = 1,024 tokens verified per round: a round is 3.7 decode steps of the default engine. Both runs also reached the card's 350 W power limit (throttle reason recorded, SM clock about 1,860 MHz against about 2,500 MHz in every other run). Scaled linearly to 2,500 MHz, an upper bound, they would still be below their chains, so the ordering does not depend on the throttling. The best shape moves with the batch: (5,8,32) at caps 1 and 8, (3,4,8) at 32. | `results/l40s/m6_6_eagle3.csv` and its sidecars |
+| The two public heads accept about equally. Chain shape. | Within ±20%. | AngelSlim **23–26% fewer** tokens per round, below Tengyunw at every shape and cap. | A statement about "EAGLE-3" is a statement about one head. | `results/l40s/m6_6_eagle3.csv` |
+
+Taken together with the rows above: on natural text, two-model chain speculation is not the strongest
+algorithm. This engine's two-model path gives 1.73× / 1.45× / 1.15× over its own default at caps 1 / 8 / 32;
+sglang's EAGLE-3 with a tree gives 2.59× / 2.03× / 1.65× over its own. On random prompts the order is the
+other way round.

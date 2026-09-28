@@ -6,12 +6,12 @@ Written from [mini-sglang](https://github.com/sgl-project/mini-sglang) (pinned a
 
 ## Status
 
-All milestones are complete (M0–M5, tag `v1.0`).
+M0–M6 are complete (tags `v1.0`, `v1.1-m6`). Next: fused operators on the engine path, behind a switch (M7, planned).
 
 - **Implemented and ablated**: continuous batching over a paged KV cache (16-token blocks), admission against a block budget with preemption, radix prefix cache, chunked prefill mixed with decode, decode CUDA Graphs, one-step-lag overlap scheduling, three scheduling policies, GPU-side sampling, an OpenAI-compatible server with streaming; a C++ core for block accounting, block-table packing and the prefix tree; two-model speculative decoding with greedy verification.
-- **Implemented, not the default**: the C++ core is selected with `--block-backend cpp`. It shortens the host path but measures no end-to-end change on either GPU tested (below), so the Python reference stays the default.
+- **Implemented, not the default**: the C++ core is selected with `--block-backend cpp`. It shortens the host path on both GPUs tested but changes nothing end to end in the default configuration; it is 8.6% faster with cache-aware admission under eviction pressure on the L40S node (below). The Python reference stays the default.
 - **Designed, not implemented**: rejection sampling for speculative decoding at temperature > 0 (only greedy verification exists); speculative decoding in the HTTP server (it runs through the engine-level harness).
-- **Open measurements**: listed at the end of `docs/design.md`.
+- **Open work**: listed at the end of `docs/design.md`.
 
 ## Results
 
@@ -49,9 +49,9 @@ The last two rows differ only in the declared maximum: the blueprint's throughpu
 | Cache-aware admission (shared prefixes, 512 requests) | +43.9% / +30.9% / +30.7% throughput in 41k / 102k / 354k-token pools |
 | Shortest-job-first | TTFT p50 −99.4%, p95 +201.8% (40k pool): the median bought with the tail |
 
-**C++ core** (`results/rtx4060-laptop/m5_1_5_*`, `m5_2_*`, `results/l40s/m5_7_*`): host path at batch 248 **1.541 → 0.920 ms** on the development host, 2.894 → 1.890 ms on the L40S node; evicting one block from a 19,172-node prefix tree 5,553 µs (Python) → 804 µs (same algorithm in C++) → 1.0 µs (ordered index). End to end: 4,019.2 vs 4,019.2 tok/s on the L40S — with CUDA Graphs and overlap the saved host time is off the critical path.
+**C++ core** (`results/rtx4060-laptop/m5_1_5_*`, `m5_2_*`, `results/l40s/m5_7_*`): host path at batch 248 **1.541 → 0.920 ms** on the development host, 2.894 → 1.890 ms on the L40S node; evicting one block from a 19,172-node prefix tree 5,553 µs (Python) → 804 µs (same algorithm in C++) → 1.0 µs (ordered index). End to end: 4,019.2 vs 4,019.2 tok/s on the L40S with first-come-first-served admission — with CUDA Graphs and overlap the saved host time is off the critical path. With cache-aware admission, 4,096 waiting requests and 786k unique prompt tokens through a 335k-token pool, the tree evicts every step (1.2 ms per eviction in Python, 13 µs in C++) and the C++ backend is **8.6% faster**, 7,768.3 vs 7,154.5 tok/s (`results/l40s/m6_7_radix.csv`, alternated A B C C B A in one job).
 
-**Speculative decoding, Qwen3-8B target / 0.6B draft, L40S** (`results/l40s/m5_5_*`, `m5_6_*`, `m6_5_*`): against the default engine, on random prompts 1.97× with one request running, 1.37× at 8, 1.03× at 32, 0.95× at 64; on MT-Bench 1.73×, 1.45×, 1.15×, 1.02× (best γ at each cap). Acceptance at γ=4 is 0.47–0.54 on MT-Bench and 0.54–0.68 on the random prompts of that sweep — random-token acceptance moves with the prompt set (0.431 on another one of the same shape). In sglang on the same token ids the same algorithm is 13–29% faster (13–24% on MT-Bench): a 0.6B decode step at batch 8 takes 3.31 ms there against 5.43 ms here, 1.73 ms of the difference in unfused elementwise kernels. A public EAGLE-3 head emits 1.8–2.2 tokens per round on random prompts against 3.1–3.7 for the 0.6B draft, but 2.6–2.8 against 2.9–3.1 on MT-Bench, where it is the faster of the two at every cap (1.97× → 1.29× over sglang's default, against 1.78× → 1.09×).
+**Speculative decoding, Qwen3-8B target / 0.6B draft, L40S** (`results/l40s/m5_5_*`, `m5_6_*`, `m6_5_*`): against the default engine, on random prompts 1.97× with one request running, 1.37× at 8, 1.03× at 32, 0.95× at 64; on MT-Bench 1.73×, 1.45×, 1.15×, 1.02× (best γ at each cap). Acceptance at γ=4 is 0.47–0.54 on MT-Bench and 0.54–0.68 on the random prompts of that sweep — random-token acceptance moves with the prompt set (0.431 on another one of the same shape). In sglang on the same token ids the same algorithm is 13–29% faster (13–24% on MT-Bench): a 0.6B decode step at batch 8 takes 3.31 ms there against 5.43 ms here, 1.73 ms of the difference in unfused elementwise kernels. A public EAGLE-3 head emits 1.8–2.2 tokens per round on random prompts against 3.1–3.7 for the 0.6B draft, but 2.6–2.8 against 2.9–3.1 on MT-Bench, where it is the faster of the two at every cap (1.97× → 1.29× over sglang's default, against 1.78× → 1.09×). With tree verification it goes further (`results/l40s/m6_6_eagle3.csv`): the best shape gives 2.59× / 2.03× / 1.65× over sglang's default at caps 1 / 8 / 32, 1.24–1.45× the two-model path — on conversational text, tree-verified EAGLE-3 is the stronger algorithm. The largest tree (32 tokens verified per request per round) is nearly free at one request and falls to 1.05× at cap 32, where the card reaches its power limit; a second public head (AngelSlim) accepts 23–26% fewer tokens per round.
 
 **Overlap across three platforms**, one offline harness, pinned pool (`results/*/m5_7_overlap.csv`):
 
@@ -102,7 +102,7 @@ make test        # pytest
 make bench-offline BENCH_ARGS="--workload shared --ablate radix --out NAME"   # engine-level benchmark
 make bench          # primary benchmark: genai-bench over HTTP, with fairness checklist and sidecar
 make bench-roofline # the device's measured copy / read bandwidth and BF16 GEMM rate, the denominators
-make gate           # pre-merge regression check against results/<device>/gate_baseline.json (about 90 s)
+make gate           # pre-merge regression check: the baseline commit and the working commit alternated in one session
 ```
 
 Engine-level benchmarks (`bench/offline.py`) feed requests straight into the engine on an open-loop arrival schedule, alternate the compared settings in one process (A B B A ...), and write one CSV row per run to `results/<device>/` together with a sidecar JSON of the measurement conditions (GPU clocks, power limit and throttle reasons, temperature, versions, commit). A run refuses to start if the GPU is busy, the power configuration is wrong, or the working tree has uncommitted changes.
