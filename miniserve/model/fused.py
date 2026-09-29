@@ -95,6 +95,24 @@ def fuse_projections(weights: dict[str, torch.Tensor], cfg: Qwen3Config) -> None
     torch.cuda.empty_cache()
 
 
+def projections_fused(weights: dict[str, torch.Tensor], cfg: Qwen3Config) -> bool:
+    """Whether :func:`fuse_projections` has already laid these weights out."""
+    return all(f"model.layers.{i}.self_attn.qkv_proj.weight" in weights for i in range(cfg.num_layers))
+
+
+def check_switchable(model: Qwen3ForCausalLM, captured: bool) -> None:
+    """Refuse to build the fused path over weights that captured graphs still point at.
+
+    Fusing moves every layer's weights into new buffers and frees the old ones; a CUDA
+    Graph captured before that replays reads of the freed memory. Fuse first (before
+    the engine is built), then switch as often as needed."""
+    if captured and not projections_fused(model.w, model.cfg):
+        raise RuntimeError(
+            "switching to fused operators would move weights that captured CUDA Graphs read; "
+            "call fuse_projections(model.w, model.cfg) before building the engine"
+        )
+
+
 class FusedQwen3ForCausalLM(Qwen3ForCausalLM):
     """The same model and interface as :class:`Qwen3ForCausalLM`, on fused operators.
 

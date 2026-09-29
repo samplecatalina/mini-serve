@@ -39,7 +39,7 @@ from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
 from miniserve.model.attention import FlashInferPagedAttention
-from miniserve.model.fused import FusedQwen3ForCausalLM, with_fused_ops
+from miniserve.model.fused import FusedQwen3ForCausalLM, check_switchable, with_fused_ops
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 from miniserve.model.transfer import CopyFence, to_device
 
@@ -107,6 +107,7 @@ class DraftRunner:
         switch to a path builds it and captures its graphs (as ``ModelRunner.set_fused_ops``)."""
         if on not in self._paths:
             base = getattr(self.model, "reference", self.model)
+            check_switchable(base, captured=self.graphs is not None)
             model = with_fused_ops(base, on)
             graphs = self._capture(model) if self._graph_buckets is not None else (None, None)
             self._paths[on] = (model, *graphs)

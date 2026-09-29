@@ -27,7 +27,7 @@ from miniserve.engine.request import PLACEHOLDER, Request
 from miniserve.engine.sampler import Sampler, SamplingArgs
 from miniserve.engine.scheduler import Batch, Phase
 from miniserve.model.attention import ContiguousAttention, FlashInferPagedAttention
-from miniserve.model.fused import with_fused_ops
+from miniserve.model.fused import check_switchable, with_fused_ops
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 from miniserve.model.transfer import CopyFence, to_device
 
@@ -139,8 +139,11 @@ class ModelRunner:
     def set_fused_ops(self, on: bool) -> None:
         """Switch between the fused and the reference operators, between passes. The first
         switch to a path builds it (sharing the weights) and captures its decode graphs, in
-        the memory the pool left free; the KV pool stays as sized for the path it was built on."""
+        the memory the pool left free; the KV pool stays as sized for the path it was built on.
+        With graphs captured on the reference path, the weights must have been fused before
+        (``check_switchable``)."""
         if on not in self._paths:
+            check_switchable(self._reference, captured=self.graphs is not None)
             model = with_fused_ops(self._reference, on)
             self._paths[on] = (model, self._capture(model) if self.graphs is not None else None)
         self.model, self.graphs = self._paths[on]

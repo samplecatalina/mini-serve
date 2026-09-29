@@ -349,6 +349,9 @@ def pct(xs: list[float], q: float) -> float:
 def table(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bench.blueprint table")
     ap.add_argument("--out", required=True, help="the name both arms were written under")
+    ap.add_argument("--arm", default=None,
+                    help="only this engine's rows of this arm (an ablation run in the same process, e.g. fused_on); "
+                    "the table and the fairness record are then written under <out>_<arm>")
     ap.add_argument("--results-dir", default=None)
     a = ap.parse_args(argv)
     results_dir = a.results_dir or sidecar.device_profile()[1].results_dir
@@ -364,13 +367,19 @@ def table(argv: list[str]) -> int:
         return statistics.median(vals)
 
     ours, theirs = rows_of(f"{results_dir}/{a.out}.csv"), rows_of(f"{results_dir}/{a.out}_blueprint.csv")
+    name = a.out
+    if a.arm:
+        ours = [r for r in ours if r["arm"] == a.arm]
+        if not ours:
+            raise SystemExit(f"no rows of arm {a.arm} in {a.out}.csv")
+        name = f"{a.out}_{a.arm}"
     keys = ("output_tok_s", "ttft_p50_ms", "ttft_p95_ms", "itl_p50_ms", "itl_p99_ms", "e2e_mean_ms")
     table_rows = []
     for key in keys:
         mine, other = med(ours, key), med(theirs, key)
         table_rows.append(dict(metric=key, miniserve=round(mine, 2), minisgl=round(other, 2),
                                ratio=round(mine / other, 4) if other else ""))
-    out = f"{results_dir}/{a.out}_compare.csv"
+    out = f"{results_dir}/{name}_compare.csv"
     with open(out, "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(table_rows[0]))
         wr.writeheader()
@@ -395,11 +404,12 @@ def table(argv: list[str]) -> int:
         "aligned_on": ALIGNED,
         "not_alignable": UNALIGNABLE,
         "blueprint_commit": BLUEPRINT_COMMIT,
+        "miniserve_arm": a.arm,
         "workload": {k: ours[0][k] for k in ("workload", "requests", "prompt_tokens", "output_tokens")},
         "miniserve": side(f"{results_dir}/{a.out}.*.sidecar.json", ours),
         "minisgl": side(f"{results_dir}/{a.out}_blueprint.*.sidecar.json", theirs),
     }
-    fair = f"{results_dir}/{a.out}_fairness.json"
+    fair = f"{results_dir}/{name}_fairness.json"
     with open(fair, "w") as f:
         json.dump(record, f, indent=2)
         f.write("\n")

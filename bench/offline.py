@@ -46,6 +46,7 @@ from miniserve.engine.engine import Engine
 from miniserve.engine.policy import make_policy
 from miniserve.engine.request import SamplingParams
 from miniserve.engine.scheduler import Phase
+from miniserve.model.fused import fuse_projections
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from miniserve.model.weights import load_config, load_weights, model_path, spec_for
 from miniserve.spec.engine import SpecEngine
@@ -296,6 +297,9 @@ ABLATIONS = {
     "spec": ("spec_off", "spec_g2", "spec_g4", "spec_g6"),
     # A round's graphs (verify pass, the draft's first step) on and off, at --spec-gamma.
     "spec_graph": ("round_graph", "round_eager"),
+    # The model's operators: the reference ones or the fused FlashInfer ones. Both arms
+    # share the process, the KV pool and the workload; each keeps its own graphs.
+    "fused_ops": ("fused_off", "fused_on"),
     "none": ("default",),
 }
 
@@ -329,6 +333,9 @@ def set_arm(eng: Engine, arm: str) -> None:
             raise SystemExit("--ablate spec_graph needs a draft model (--spec-draft) and --spec-gamma > 0")
         kv.set_radix(kv.radix)
         eng.round_graphs = arm == "round_graph"
+    elif arm in ("fused_off", "fused_on"):
+        kv.set_radix(kv.radix)
+        eng.set_fused_ops(arm == "fused_on")
     elif arm.startswith("chunk_"):
         kv.set_radix(kv.radix)
         eng.scheduler.chunked_prefill_size = 0 if arm == "chunk_off" else int(arm.removeprefix("chunk_"))
@@ -387,11 +394,18 @@ def main() -> int:
 
     path = model_path(spec_for(args.model), download=False)
     model = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(path)), load_weights(path))
+    if args.ablate == "fused_ops":
+        # The arms switch operator paths in one engine; fusing moves the weights, which
+        # graphs captured before it would still read. So fuse first: both arms then run
+        # on the same layout (the reference path is bitwise unchanged by it).
+        fuse_projections(model.w, model.cfg)
     if args.spec_draft:
         draft = model
         if args.spec_draft != "same":
             dpath = model_path(spec_for(args.spec_draft), download=False)
             draft = Qwen3ForCausalLM(Qwen3Config.from_dict(load_config(dpath)), load_weights(dpath))
+        if args.ablate == "fused_ops":
+            fuse_projections(draft.w, draft.cfg)
         kw = engine_kwargs(args)
         kw.pop("cuda_graph_max_bs")
         eng = SpecEngine(model, draft, gamma=args.spec_gamma, cuda_graph_max_bs=args.cuda_graph_max_bs, **kw)
@@ -482,6 +496,7 @@ def main() -> int:
                     spec_tokens_per_round=round(eng.tokens_per_round, 3) if isinstance(eng, SpecEngine) else "",
                     sm_mhz_mean=gpu_run["sm_mhz"]["mean"],
                     git_commit=env["git_commit"][:12],
+                    fused_ops=eng.fused_ops,
                 )
             )
             print(" ".join(f"{k}={v}" for k, v in rows[-1].items() if k not in ("run_id", "git_commit")), flush=True)
@@ -489,6 +504,12 @@ def main() -> int:
 
     csv_path = f"{args.results_dir}/{args.out}.csv"
     new = not os.path.exists(csv_path)
+    if not new:
+        with open(csv_path, newline="") as f:
+            header = next(csv.reader(f), [])
+        if header != list(rows[0]):
+            # Rows appended under another header would be read back into the wrong columns.
+            raise SystemExit(f"{csv_path} has other columns than these rows; write under a new --out")
     with open(csv_path, "a", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
         if new:

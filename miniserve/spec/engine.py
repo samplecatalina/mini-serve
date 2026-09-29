@@ -54,7 +54,7 @@ from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase
-from miniserve.model.fused import with_fused_ops
+from miniserve.model.fused import check_switchable, with_fused_ops
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from miniserve.spec.draft import FIRST_WIDTH, DraftRunner
 from miniserve.spec.verify import accept_prefix
@@ -207,6 +207,9 @@ class SpecEngine(Engine):
     def set_fused_ops(self, on: bool) -> None:
         """Both models switch together; the round graphs of the new path are captured the
         first time (verify for the current gamma, the draft's steps)."""
+        if on not in self._verify_by_path:
+            check_switchable(self.runner._reference, captured=bool(self._verify_graphs))
+            check_switchable(getattr(self.draft.model, "reference", self.draft.model), captured=self.draft.graphs is not None)
         super().set_fused_ops(on)
         self.draft.set_fused_ops(on)
         self._verify_graphs = self._verify_by_path.setdefault(on, {})

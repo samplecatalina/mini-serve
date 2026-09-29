@@ -228,6 +228,7 @@ def test_decode_graph_matches_eager(lens, model):
 def test_switching_paths_at_run_time(model, reference):
     """One engine, switched between operator paths while idle: each path gives what an engine
     built on it gives, and the switch refuses to run while a request is in flight."""
+    fuse_projections(model.w, model.cfg)  # before any graph is captured (check_switchable)
     names = ["short_en", "code", "zh"]
     prompts = [reference[k][0] for k in names]
     params = SamplingParams(24, STOP_IDS)
@@ -244,6 +245,26 @@ def test_switching_paths_at_run_time(model, reference):
     while eng.has_unfinished:
         eng.step()
     _assert_no_leak(eng)
+
+
+def test_switching_refuses_to_move_weights_under_captured_graphs(qwen3_path):
+    """Fusing moves the weights; graphs captured on the reference path would then read freed
+    memory. With graphs the switch is refused until the weights are fused; without, it is fine."""
+    from miniserve.spec.engine import SpecEngine
+
+    m = _load(qwen3_path)
+    eng = _engine(m, kv_pool_tokens=1024, max_running=4)
+    with pytest.raises(RuntimeError, match="fuse_projections"):
+        eng.set_fused_ops(True)
+    spec = SpecEngine(m, m, gamma=2, max_running=4, kv_pool_tokens=1024)
+    with pytest.raises(RuntimeError, match="fuse_projections"):
+        spec.set_fused_ops(True)
+    eager = _engine(m, kv_pool_tokens=1024, max_running=4, cuda_graph=False)
+    eager.set_fused_ops(True)  # nothing captured: the weights may move
+    assert eager.generate([[9707, 11, 847]], SamplingParams(4))
+    del eng, spec, eager, m
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def test_the_description_records_the_path(model):
@@ -366,6 +387,7 @@ def test_spec_switching_paths_at_run_time(model):
     and each path proposes and accepts what an engine built on it does."""
     from miniserve.spec.engine import SpecEngine
 
+    fuse_projections(model.w, model.cfg)
     prompts = [[9707, 11, 847, 829, 374], [785, 6722, 315, 9625, 374]]
     params = SamplingParams(24)
     fresh = {
