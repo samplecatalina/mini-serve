@@ -27,6 +27,7 @@ from miniserve.engine.request import PLACEHOLDER, Request
 from miniserve.engine.sampler import Sampler, SamplingArgs
 from miniserve.engine.scheduler import Batch, Phase
 from miniserve.model.attention import ContiguousAttention, FlashInferPagedAttention
+from miniserve.model.fused import with_fused_ops
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 from miniserve.model.transfer import CopyFence, to_device
 
@@ -49,6 +50,7 @@ class ModelRunner:
         block_backend: str | None = None,
         sample_rows: int | None = None,
         attn_workspace_mb: int | None = None,
+        fused_ops: bool = False,
     ):
         """In paged mode the KV pool is sized from the GPU memory left after the
         weights and the peak memory of a ``max_prefill_tokens`` prefill followed
@@ -63,10 +65,15 @@ class ModelRunner:
         ``sample_rows``: rows of logits the profiled peak must hold (default ``max_running``);
         a verify pass takes the logits of several positions per request.
         ``attn_workspace_mb``: FlashInfer's scratch buffer, shared by every pass and graph of this
-        runner (default ``FlashInferPagedAttention.WORKSPACE_BYTES``)."""
+        runner (default ``FlashInferPagedAttention.WORKSPACE_BYTES``).
+        ``fused_ops``: run the model on fused FlashInfer operators (``model/fused.py``), sharing
+        its weights; the reference operators otherwise. :meth:`set_fused_ops` switches at run time."""
         if attention not in ATTENTION_MODES:
             raise ValueError(f"attention must be one of {ATTENTION_MODES}, got {attention!r}")
+        self._reference = getattr(model, "reference", model)
+        model = with_fused_ops(model, fused_ops)
         self.model = model
+        self.fused_ops = fused_ops
         self.device = model.device
         self.attention = attention
         self.block_backend = block_backend if block_backend is not None else default_backend()
@@ -105,22 +112,39 @@ class ModelRunner:
             self.pool = pool(num_blocks + 1)
             self.flashinfer.pool = self.pool
             if cuda_graph:
-                self.graphs = DecodeGraphs(
-                    model,
-                    self.pool,
-                    dummy_block=num_blocks,
-                    buckets=graph_buckets(cuda_graph_max_bs or max_running),
-                    workspace=self.flashinfer.workspace,
-                    num_heads=cfg.num_heads,
-                    scale=model.attn_scale,
-                    fence=self.fence,
-                )
+                self._graph_buckets = graph_buckets(cuda_graph_max_bs or max_running)
+                self.graphs = self._capture(model)
                 self.use_cuda_graph = True
                 self.kv_profile.update(
                     graph_buckets=self.graphs.buckets,
                     graph_bytes=self.graphs.graph_bytes,
                     graph_capture_s=round(self.graphs.capture_s, 2),
                 )
+        # Both operator paths share the pool; each has its own decode graphs (see set_fused_ops).
+        self._paths = {fused_ops: (model, self.graphs)}
+
+    def _capture(self, model: Qwen3ForCausalLM) -> DecodeGraphs:
+        cfg = model.cfg
+        return DecodeGraphs(
+            model,
+            self.pool,
+            dummy_block=self.allocator.num_blocks,
+            buckets=self._graph_buckets,
+            workspace=self.flashinfer.workspace,
+            num_heads=cfg.num_heads,
+            scale=model.attn_scale,
+            fence=self.fence,
+        )
+
+    def set_fused_ops(self, on: bool) -> None:
+        """Switch between the fused and the reference operators, between passes. The first
+        switch to a path builds it (sharing the weights) and captures its decode graphs, in
+        the memory the pool left free; the KV pool stays as sized for the path it was built on."""
+        if on not in self._paths:
+            model = with_fused_ops(self._reference, on)
+            self._paths[on] = (model, self._capture(model) if self.graphs is not None else None)
+        self.model, self.graphs = self._paths[on]
+        self.fused_ops = on
 
     def _profile(self, make_pool, block_size: int, num_tokens: int, num_rows: int, fraction: float) -> dict[str, int]:
         """Peak activation memory of a ``num_tokens`` prefill followed by sampling ``num_rows``

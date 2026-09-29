@@ -40,6 +40,7 @@ def engine_description(engine: Engine) -> dict:
         cuda_graph_bytes=None if graphs is None else graphs.graph_bytes,
         cuda_graph_capture_s=None if graphs is None else round(graphs.capture_s, 2),
         dtype=str(runner.model.dtype).removeprefix("torch."),
+        fused_ops=runner.fused_ops,
     )
 
 

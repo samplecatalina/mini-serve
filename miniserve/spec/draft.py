@@ -39,6 +39,7 @@ from miniserve.cache.block_table import BlockTable
 from miniserve.cache.kv_pool import KVPool
 from miniserve.engine.cuda_graph import DecodeGraphs, graph_buckets
 from miniserve.model.attention import FlashInferPagedAttention
+from miniserve.model.fused import FusedQwen3ForCausalLM, with_fused_ops
 from miniserve.model.qwen3 import Qwen3ForCausalLM
 from miniserve.model.transfer import CopyFence, to_device
 
@@ -80,17 +81,36 @@ class DraftRunner:
         self.first_graphs: DecodeGraphs | None = None
         # Whether a round's first step replays ``first_graphs`` (switchable at run time).
         self.use_first_graphs = cuda_graph
+        self._graph_buckets = graph_buckets(cuda_graph_max_bs) if cuda_graph else None
         if cuda_graph:
-            common = dict(
-                dummy_block=num_blocks,
-                buckets=graph_buckets(cuda_graph_max_bs),
-                workspace=self.attn.workspace,
-                num_heads=cfg.num_heads,
-                scale=model.attn_scale,
-                fence=self.fence,
-            )
-            self.graphs = DecodeGraphs(model, self.pool, **common)
-            self.first_graphs = DecodeGraphs(model, self.pool, width=FIRST_WIDTH, **common)
+            self.graphs, self.first_graphs = self._capture(model)
+        # Operator paths (fused or reference) prepared so far, keyed by whether they are fused.
+        self._paths = {self.fused_ops: (model, self.graphs, self.first_graphs)}
+
+    def _capture(self, model: Qwen3ForCausalLM) -> tuple[DecodeGraphs, DecodeGraphs]:
+        common = dict(
+            dummy_block=self.allocator.num_blocks,
+            buckets=self._graph_buckets,
+            workspace=self.attn.workspace,
+            num_heads=model.cfg.num_heads,
+            scale=model.attn_scale,
+            fence=self.fence,
+        )
+        return DecodeGraphs(model, self.pool, **common), DecodeGraphs(model, self.pool, width=FIRST_WIDTH, **common)
+
+    @property
+    def fused_ops(self) -> bool:
+        return isinstance(self.model, FusedQwen3ForCausalLM)
+
+    def set_fused_ops(self, on: bool) -> None:
+        """Switch the draft between fused and reference operators, between rounds; the first
+        switch to a path builds it and captures its graphs (as ``ModelRunner.set_fused_ops``)."""
+        if on not in self._paths:
+            base = getattr(self.model, "reference", self.model)
+            model = with_fused_ops(base, on)
+            graphs = self._capture(model) if self._graph_buckets is not None else (None, None)
+            self._paths[on] = (model, *graphs)
+        self.model, self.graphs, self.first_graphs = self._paths[on]
 
     # ------------------------------------------------------------------ per request
 

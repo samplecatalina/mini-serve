@@ -56,6 +56,7 @@ class Engine:
         schedule_policy: str = "fcfs",
         block_backend: str | None = None,
         attn_workspace_mb: int | None = None,
+        fused_ops: bool = False,
     ):
         """``kv_pool_tokens``: exact KV pool size (default: as large as GPU memory allows).
         ``radix``: reuse cached KV of shared prefixes (paged attention only).
@@ -67,6 +68,7 @@ class Engine:
         ``schedule_policy``: admission order and preemption choice (``policy.py``).
         ``block_backend``: implementation of the KV block bookkeeping (``python`` or ``cpp``).
         ``attn_workspace_mb``: FlashInfer's scratch buffer (default 128 MiB).
+        ``fused_ops``: run the model on fused FlashInfer operators instead of the reference ones.
         ``seed``: seeds the sampling of requests submitted without a seed of their own, in
         submission order. ``runner``: use this model runner instead of building one for ``model``."""
         if runner is None:
@@ -81,6 +83,7 @@ class Engine:
                 cuda_graph_max_bs=cuda_graph_max_bs,
                 block_backend=block_backend,
                 attn_workspace_mb=attn_workspace_mb,
+                fused_ops=fused_ops,
             )
         self.runner = runner
         if chunked_prefill_size is None:
@@ -101,6 +104,17 @@ class Engine:
         self.overlap = overlap
         self.launched: Batch | None = None  # the batch the last step() launched
         self._inflight: _Launched | None = None  # launched, not read back yet
+
+    @property
+    def fused_ops(self) -> bool:
+        """Whether the model runs on fused operators (``model/fused.py``)."""
+        return self.runner.fused_ops
+
+    def set_fused_ops(self, on: bool) -> None:
+        """Switch operator paths while idle: a request's tokens all come from one path."""
+        if self.has_unfinished:
+            raise RuntimeError("switch operator paths only while no request is in flight")
+        self.runner.set_fused_ops(on)
 
     def add_request(self, prompt_ids: Sequence[int], params: SamplingParams) -> Request:
         req = Request(next(self._rids), list(prompt_ids), params)

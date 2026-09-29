@@ -54,6 +54,7 @@ from miniserve.engine.engine import Engine
 from miniserve.engine.model_runner import ModelRunner
 from miniserve.engine.request import Request, RequestState, SamplingParams
 from miniserve.engine.scheduler import Batch, Phase
+from miniserve.model.fused import with_fused_ops
 from miniserve.model.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from miniserve.spec.draft import FIRST_WIDTH, DraftRunner
 from miniserve.spec.verify import accept_prefix
@@ -103,14 +104,16 @@ class SpecEngine(Engine):
         block_backend: str | None = None,
         block_size: int = 16,
         attn_workspace_mb: int | None = None,
+        fused_ops: bool = False,
     ):
         """``draft_model``: the proposing model, same tokenizer, same dtype (it may be the
         target itself, which makes every proposal a correct one and is how the loop is tested).
         ``gamma``: proposals per round; 0 runs plain decode steps through the same object,
         which is the off arm of the ablation. ``cuda_graph``: capture the graphs of a round
         (the draft's steps and the target's verify pass; the target's decode graphs are
-        never captured here). Every other argument means what it
-        means for ``Engine``, except that ``radix`` and ``overlap`` must be off."""
+        never captured here). ``fused_ops``: both models on fused operators. Every other
+        argument means what it means for ``Engine``, except that ``radix`` and ``overlap``
+        must be off."""
         check_options(attention, radix, overlap, gamma)
         if model.dtype is not draft_model.dtype:
             raise ValueError(f"draft dtype {draft_model.dtype} differs from the target's {model.dtype}")
@@ -136,6 +139,7 @@ class SpecEngine(Engine):
             # A verify pass holds the logits of every verified position, not one row per request.
             sample_rows=max_running * (gamma + 1),
             attn_workspace_mb=attn_workspace_mb,
+            fused_ops=fused_ops,
         )
         super().__init__(
             None,
@@ -150,7 +154,7 @@ class SpecEngine(Engine):
             schedule_policy=schedule_policy,
         )
         self.draft = DraftRunner(
-            draft_model,
+            with_fused_ops(draft_model, fused_ops),
             num_blocks=runner.allocator.num_blocks,
             block_size=block_size,
             max_prefill_tokens=max_prefill_tokens,
@@ -161,7 +165,9 @@ class SpecEngine(Engine):
         )
         self._cuda_graph = cuda_graph
         self._graph_max_bs = cuda_graph_max_bs or max_running
-        self._verify_graphs: dict[int, DecodeGraphs] = {}
+        # Verify graphs by width, one set per operator path (see set_fused_ops).
+        self._verify_by_path: dict[bool, dict[int, DecodeGraphs]] = {runner.fused_ops: {}}
+        self._verify_graphs = self._verify_by_path[runner.fused_ops]
         self._round_graphs = cuda_graph
         self._gamma = 0
         self.gamma = gamma
@@ -197,6 +203,14 @@ class SpecEngine(Engine):
                 fence=runner.fence,
                 width=value + 1,
             )
+
+    def set_fused_ops(self, on: bool) -> None:
+        """Both models switch together; the round graphs of the new path are captured the
+        first time (verify for the current gamma, the draft's steps)."""
+        super().set_fused_ops(on)
+        self.draft.set_fused_ops(on)
+        self._verify_graphs = self._verify_by_path.setdefault(on, {})
+        self.gamma = self._gamma
 
     @property
     def round_graphs(self) -> bool:

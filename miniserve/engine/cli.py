@@ -64,6 +64,13 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
         help="implementation of the KV block bookkeeping: python (default) or cpp "
         "(requires the built extension); also settable with MINISERVE_BLOCK_BACKEND",
     )
+    g.add_argument(
+        "--fused-ops",
+        action="store_true",
+        help="run the model on fused FlashInfer operators (RMSNorm, residual add + RMSNorm, rotary, "
+        "SiLU and multiply; Q/K/V and gate/up each one GEMM) instead of the reference operators, "
+        "which reproduce Hugging Face transformers bitwise",
+    )
 
 
 def add_spec_args(parser: argparse.ArgumentParser) -> None:
@@ -95,4 +102,5 @@ def engine_kwargs(args: argparse.Namespace) -> dict:
         cuda_graph_max_bs=args.cuda_graph_max_bs,
         block_backend=args.block_backend,
         attn_workspace_mb=args.attn_workspace_mb,
+        fused_ops=args.fused_ops,
     )
