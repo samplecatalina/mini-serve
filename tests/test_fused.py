@@ -340,18 +340,22 @@ def test_the_drafts_graphs_propose_what_eager_proposes(model):
 
 @pytest.fixture(scope="module")
 def target():
-    """The 1.7B target of the speculative anchor, loaded once for both of its cases."""
+    """The target of the speculative anchor, loaded once for both of its cases: 1.7B, or the
+    size in ``MINISERVE_SPEC_ANCHOR_TARGET`` (8B on a GPU that holds it next to the draft)."""
+    import os
+
     from test_spec import _load as load_size
     from test_spec import _need_free_memory
 
-    _need_free_memory(5.0)
-    return load_size("1.7B")
+    size = os.environ.get("MINISERVE_SPEC_ANCHOR_TARGET", "1.7B")
+    _need_free_memory({"1.7B": 5.0, "8B": 20.0}.get(size, 5.0))
+    return load_size(size)
 
 
 @pytest.mark.parametrize("alone", [True, False], ids=["alone", "under_load"])
 def test_speculation_matches_the_reference(tokenizer, model, target, alone):
-    """The speculative anchor with both models on fused operators: 1.7B target, 0.6B draft,
-    held to the tolerance rules against the target's reference path."""
+    """The speculative anchor with both models on fused operators: 1.7B (or 8B) target, 0.6B
+    draft, held to the tolerance rules against the target's reference path."""
     from test_spec import ANCHOR_PROMPTS, ANCHOR_TOKENS, _reference
 
     from miniserve.spec.engine import SpecEngine
