@@ -36,29 +36,63 @@ from miniserve.model.qwen3 import ContiguousKVCache, Qwen3Config, Qwen3ForCausal
 from miniserve.model.transfer import to_device
 
 
+# Per layer, in the order they are laid out in the layer's buffer; the two groups of
+# projections are concatenated along their output rows.
+_GROUPS = (("self_attn.qkv_proj", ("q_proj", "k_proj", "v_proj")), ("mlp.gate_up_proj", ("gate_proj", "up_proj")))
+_OTHERS = (
+    "self_attn.o_proj.weight",
+    "mlp.down_proj.weight",
+    "input_layernorm.weight",
+    "post_attention_layernorm.weight",
+    "self_attn.q_norm.weight",
+    "self_attn.k_norm.weight",
+)
+_ALIGN = 128  # elements between tensors in a layer's buffer (256 bytes in BF16)
+
+
 def fuse_projections(weights: dict[str, torch.Tensor], cfg: Qwen3Config) -> None:
     """Concatenate each layer's Q/K/V and gate/up projection weights, in place.
 
     Adds ``self_attn.qkv_proj.weight`` and ``mlp.gate_up_proj.weight`` per layer and
-    points the separate entries at row slices of them, so the originals are freed.
-    One layer at a time: the peak is one layer's projections above the steady state.
-    Idempotent."""
+    points the separate entries at row slices of them. Every weight of the layer moves
+    into one new buffer, so the allocator segments that held the originals empty out
+    completely and go back to the device: freeing only the projections would leave
+    holes between the tensors still living next to them, which the caching allocator
+    cannot return. One layer at a time: the peak is about one layer above the steady
+    state. Idempotent."""
     for i in range(cfg.num_layers):
-        for fused, parts in (
-            (f"model.layers.{i}.self_attn.qkv_proj.weight", ("q_proj", "k_proj", "v_proj")),
-            (f"model.layers.{i}.mlp.gate_up_proj.weight", ("gate_proj", "up_proj")),
-        ):
-            if fused in weights:
-                continue
-            prefix = fused.rsplit(".", 2)[0] + "."
-            keys = [prefix + p + ".weight" for p in parts]
-            cat = torch.cat([weights[k] for k in keys], dim=0)
-            start = 0
-            for k in keys:
-                n = weights[k].shape[0]
-                weights[k] = cat[start : start + n]
-                start += n
-            weights[fused] = cat
+        p = f"model.layers.{i}."
+        if p + "self_attn.qkv_proj.weight" in weights:
+            continue
+        parts = [[p + f"{g.split('.')[0]}.{n}.weight" for n in names] for g, names in _GROUPS]
+        src = [weights[k] for group in parts for k in group] + [weights[p + k] for k in _OTHERS]
+        # The members of a group sit back to back (they form one matrix); everything
+        # else starts on an aligned offset.
+        last_of_group = {sum(len(g) for g in parts[: j + 1]) - 1 for j in range(len(parts))}
+        grouped = sum(len(g) for g in parts)
+        offsets, total = [], 0
+        for j, t in enumerate(src):
+            offsets.append(total)
+            total += t.numel()
+            if j >= grouped or j in last_of_group:
+                total = -(-total // _ALIGN) * _ALIGN
+        buf = torch.empty(total, dtype=src[0].dtype, device=src[0].device)
+        views = [buf[o : o + t.numel()].view(t.shape).copy_(t) for o, t in zip(offsets, src)]
+        k = 0
+        for (group, _), keys in zip(_GROUPS, parts):
+            rows = sum(views[k + j].shape[0] for j in range(len(keys)))
+            first = views[k]
+            weights[p + group + ".weight"] = buf[offsets[k] : offsets[k] + rows * first.shape[1]].view(rows, first.shape[1])
+            for key in keys:
+                weights[key] = views[k]
+                k += 1
+        for key in _OTHERS:
+            weights[p + key] = views[k]
+            k += 1
+        del src, views
+        if i % 4 == 3:
+            torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
 
 class FusedQwen3ForCausalLM(Qwen3ForCausalLM):

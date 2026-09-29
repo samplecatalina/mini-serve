@@ -71,7 +71,9 @@ def _all_logits(model, ids: list[int]) -> torch.Tensor:
 def test_concatenated_weights_leave_the_reference_bitwise(qwen3_path, tokenizer):
     """The reference path on row slices of the concatenated projections gives bitwise the same
     logits as on the separate tensors (prefill, every position, and incremental decode), and the
-    concatenation holds no more device memory than the separate tensors did."""
+    concatenation holds no more device memory than the separate tensors did: counted as the
+    memory the device has free, since tensors freed next to live ones leave holes the caching
+    allocator keeps."""
     from miniserve.model.generate import greedy_generate
 
     m = _load(qwen3_path)
@@ -79,16 +81,21 @@ def test_concatenated_weights_leave_the_reference_bitwise(qwen3_path, tokenizer)
     before_logits = _all_logits(m, ids)
     gaps_before: list[float] = []
     before_tokens = greedy_generate(m, ids[:40], 16, top2_gaps=gaps_before)
-    gc.collect()
-    torch.cuda.synchronize()
-    mem_before = torch.cuda.memory_allocated()
+
+    def device_memory() -> tuple[int, int]:
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        return torch.cuda.memory_allocated(), torch.cuda.mem_get_info()[0]
+
+    alloc_before, free_before = device_memory()
     fuse_projections(m.w, m.cfg)
-    gc.collect()
-    torch.cuda.synchronize()
-    mem_after = torch.cuda.memory_allocated()
+    alloc_after, free_after = device_memory()
     q = m.w["model.layers.5.self_attn.q_proj.weight"]
     assert q.untyped_storage().data_ptr() == m.w["model.layers.5.self_attn.qkv_proj.weight"].untyped_storage().data_ptr()
-    assert mem_after == mem_before, (mem_before, mem_after)
+    print(f"\nallocated {alloc_before} -> {alloc_after} B; free {free_before} -> {free_after} B")
+    assert alloc_after - alloc_before <= 2**20  # alignment padding only
+    assert free_after >= free_before, (free_before, free_after)
     fuse_projections(m.w, m.cfg)  # idempotent
     assert m.w["model.layers.5.self_attn.q_proj.weight"] is q
     assert torch.equal(_all_logits(m, ids), before_logits)
