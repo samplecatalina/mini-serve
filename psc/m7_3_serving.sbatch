@@ -16,6 +16,8 @@
 #
 #   sbatch -p GPU-shared --gres=gpu:l40s-48:1 -o $PROJECT/logs/%x_%j.log \
 #          --export=ALL,DEVICE=l40s psc/m7_3_serving.sbatch
+# One part again (PARTS=serving, a shorter wall):
+#   sbatch ... -t 02:30:00 --export=ALL,DEVICE=l40s,PARTS=serving psc/m7_3_serving.sbatch
 #SBATCH -N 1 -t 05:00:00 -J miniserve-m7-c1
 set -uo pipefail
 : "${PROJECT:?} ${DEVICE:?l40s}"
@@ -27,6 +29,9 @@ CACHE=${CACHE:-$PROJECT/miniserve_cache}
 OUT=${OUT:-$PROJECT/results/$DEVICE}
 PROF=${PROF:-$PROJECT/profiling/$DEVICE}
 CAPS=${CAPS:-"8 32 128"}
+# Which parts to run (a rerun of one part skips the others): anchor serving overlap timelines.
+PARTS=${PARTS:-"anchor serving overlap timelines"}
+part() { [[ " $PARTS " == *" $1 "* ]]; }
 export PYTHONUNBUFFERED=1 TMPDIR=$PROJECT/tmp
 T0=$(date +%s); el() { echo "[t+$(( $(date +%s) - T0 ))s] $*"; }
 case $DEVICE in l40s) GPU="L40S"; ARCH=8.9;; *) echo "unknown DEVICE $DEVICE" >&2; exit 2;; esac
@@ -65,16 +70,28 @@ step() {  # one failure must not take the rest of the allocation with it
 }
 
 # ---------------------------------------------------------------- 1. the anchor
+if part anchor; then
 el "anchor: fused path (tests/test_fused.py; speculative case on 8B / 0.6B)"
 ALOG=$PROJECT/logs/m7_3_anchor_${SLURM_JOB_ID:-local}_c1.log
 "${MS[@]}" python -m pytest -q -s -p no:cacheprovider tests/test_fused.py > "$ALOG" 2>&1; rc=$?
 grep -E "^\[|passed|failed|skipped|^E " "$ALOG"
 # A skipped case (the 8B one when memory is short) is an anchor that did not run: stop as well.
 if [ $rc -ne 0 ] || grep -q " skipped" "$ALOG"; then el "anchor FAILED or incomplete (exit $rc): nothing else runs"; exit 1; fi
+fi
 
 # ---------------------------------------------------------------- 2. the main caliber
+if part serving; then
 MODEL_IN=/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
-PORT_MS=${PORT_MS:-8000}; PORT_SG=${PORT_SG:-30000}
+# Ports: the nodes are shared, and a fixed port can already be taken by someone else's server --
+# which then answers the readiness probe in our place (the first run of this job lost every
+# run of this engine that way). So each start takes a port nobody listens on, and readiness
+# means our own process is alive and the server that answers says which engine it is.
+free_port() {  # free_port <from>: the first port at or above it with no listener
+  local p=$1
+  while (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; do p=$((p + 1)); done
+  echo "$p"
+}
+PORT_BASE=$(( 18000 + ${SLURM_JOB_ID:-0} % 1000 ))
 POOL=335000; CHUNK=4096; PREFILL_TOKENS=16384; RUNNING=256
 SERVER_PID=""
 stop_server() {
@@ -89,25 +106,27 @@ stop_server() {
   el "    WARNING: ${used} MiB still in use after 60s"
 }
 trap stop_server EXIT
-wait_up() {  # wait_up <port> <log>
+wait_up() {  # wait_up <port> <log> <route> <pattern>: our process alive and <route> naming the engine
   for i in $(seq 1 900); do
-    curl -sf "http://127.0.0.1:$1/health" >/dev/null 2>&1 && { el "    up after ${i}s"; return 0; }
     kill -0 "$SERVER_PID" 2>/dev/null || { el "    server exited"; tail -40 "$2"; return 1; }
+    curl -sf "http://127.0.0.1:$1$3" 2>/dev/null | grep -q "$4" && { el "    up after ${i}s on port $1"; return 0; }
     sleep 1
   done
   el "    server never answered"; tail -40 "$2"; return 1
 }
 start_miniserve() {  # start_miniserve [--fused-ops]
   stop_server
+  PORT_MS=$(free_port "$PORT_BASE")
   local log=$TMPDIR/ms_${SLURM_JOB_ID}.log
   "${MS[@]}" python -m miniserve.server --host 127.0.0.1 --port "$PORT_MS" \
       --max-running "$RUNNING" --cuda-graph-max-bs 256 --kv-pool-tokens "$POOL" \
       --chunked-prefill-size "$CHUNK" --max-prefill-tokens "$PREFILL_TOKENS" --schedule-policy fcfs "$@" \
       > "$log" 2>&1 &
-  SERVER_PID=$!; wait_up "$PORT_MS" "$log"
+  SERVER_PID=$!; wait_up "$PORT_MS" "$log" /server_info '"server": *"miniserve"'
 }
 start_sglang() {
   stop_server
+  PORT_SG=$(free_port $(( PORT_BASE + 1000 )))
   local log=$TMPDIR/sg_${SLURM_JOB_ID}.log
   "${SG[@]}" python -m sglang.launch_server --model-path "$MODEL_IN" \
       --served-model-name Qwen/Qwen3-0.6B --host 127.0.0.1 --port "$PORT_SG" \
@@ -115,16 +134,16 @@ start_sglang() {
       --cuda-graph-max-bs 256 --max-total-tokens "$POOL" \
       --chunked-prefill-size "$CHUNK" --max-prefill-tokens "$PREFILL_TOKENS" --schedule-policy fcfs \
       > "$log" 2>&1 &
-  SERVER_PID=$!; wait_up "$PORT_SG" "$log"
+  SERVER_PID=$!; wait_up "$PORT_SG" "$log" /get_server_info '"model_path"'
 }
 el "conditions"; "${LOAD[@]}" python -m bench.sidecar /out/m7_3_serving_preflight.json >/dev/null || exit 1
 serve() {  # serve <engine>: miniserve | miniserve-fused | sglang
   local engine=$1 port kind
   el "  $engine"
   case $engine in
-    miniserve) port=$PORT_MS; kind=miniserve; start_miniserve || { FAILED+=("$engine"); return 0; };;
-    miniserve-fused) port=$PORT_MS; kind=miniserve; start_miniserve --fused-ops || { FAILED+=("$engine"); return 0; };;
-    sglang) port=$PORT_SG; kind=sglang; start_sglang || { FAILED+=("$engine"); return 0; };;
+    miniserve) kind=miniserve; start_miniserve || { FAILED+=("$engine"); return 0; }; port=$PORT_MS;;
+    miniserve-fused) kind=miniserve; start_miniserve --fused-ops || { FAILED+=("$engine"); return 0; }; port=$PORT_MS;;
+    sglang) kind=sglang; start_sglang || { FAILED+=("$engine"); return 0; }; port=$PORT_SG;;
   esac
   "${LOAD[@]}" python -m bench.serving --url "http://127.0.0.1:$port" --server-kind "$kind" \
       --label "$engine" --results-dir /out --out m7_3_serving \
@@ -139,8 +158,10 @@ for round in "miniserve miniserve-fused sglang" "sglang miniserve-fused miniserv
   for engine in $round; do serve "$engine"; done
 done
 stop_server
+fi
 
 # ---------------------------------------------------------------- 3. overlap on both paths
+if part overlap; then
 C="--workload unique --prefix-len 480 --suffix-len 32 --output-len 256 --rounds 3 --results-dir /out"
 for model in 0.6B 8B; do
   extra=""; [ "$model" = 8B ] && extra="--attn-workspace-mb 512 --warmup-max-s 300"
@@ -156,8 +177,11 @@ for model in 0.6B 8B; do
   done
 done
 
+fi
+
 # ---------------------------------------------------------------- 4. timelines
-if [ -n "$NSYS_ROOT" ]; then
+if ! part timelines; then :
+elif [ -n "$NSYS_ROOT" ]; then
   NS="$NSYS_ROOT/bin/nsys profile -t cuda,nvtx --cuda-graph-trace=node --cuda-memory-usage=false"
   NR="--capture-range=nvtx --nvtx-capture=measure --capture-range-end=stop"
   D8="--workload unique --groups 8 --per-group 1 --prefix-len 480 --suffix-len 32 --output-len 256 --rounds 1
