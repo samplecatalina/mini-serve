@@ -1,0 +1,356 @@
+{
+  "run_id": "20260930T073053",
+  "config": {
+    "max_running": 32,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 32768,
+    "seed": 0,
+    "disable_radix": false,
+    "chunked_prefill_size": null,
+    "schedule_policy": "fcfs",
+    "disable_overlap": false,
+    "disable_cuda_graph": false,
+    "cuda_graph_max_bs": 32,
+    "attn_workspace_mb": null,
+    "block_backend": null,
+    "fused_ops": false,
+    "spec_draft": null,
+    "spec_gamma": 4,
+    "model": "0.6B",
+    "workload": "unique",
+    "groups": 128,
+    "per_group": 1,
+    "prefix_len": 480,
+    "suffix_len": 32,
+    "output_len": 256,
+    "num_long": 8,
+    "long_len": 3072,
+    "long_output_len": 16,
+    "short_len": 256,
+    "long_fraction": 0.25,
+    "short_output_len": 32,
+    "arrival_rate": 0.0,
+    "workload_seed": 0,
+    "ablate": "overlap",
+    "rounds": 3,
+    "arms": null,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 90.0,
+    "out": "m7_3_overlap_ref",
+    "allow_dirty": false,
+    "results_dir": "/out",
+    "engine": {
+      "max_running": 32,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 32768,
+      "seed": 0,
+      "radix": true,
+      "chunked_prefill_size": null,
+      "cuda_graph": true,
+      "overlap": true,
+      "schedule_policy": "fcfs",
+      "cuda_graph_max_bs": 32,
+      "block_backend": null,
+      "attn_workspace_mb": null,
+      "fused_ops": false
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 272700928,
+      "free_bytes": 45640450048,
+      "total_bytes": 47695921152,
+      "block_bytes": 1835008,
+      "max_blocks": 22251,
+      "num_blocks": 2048,
+      "graph_buckets": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "graph_bytes": 36481536,
+      "graph_capture_s": 0.51
+    }
+  },
+  "environment": {
+    "git_commit": "49db0a156180f891968f29e1dafcb8943005e25a",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.57.04",
+    "cpu": "Intel(R) Xeon(R) 6740E"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 56570.615260878,
+      "name": "NVIDIA L40S",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 43,
+      "power_w": 36.81,
+      "power_limit_w": 350.0,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 0
+    },
+    "idle_power_limit_w": [
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0
+    ],
+    "power_max_limit_w": 350.0,
+    "host": null
+  },
+  "warmup": {
+    "seconds": 27.2,
+    "runs": 3,
+    "settled_by": "window",
+    "gpu": {
+      "num_samples": 56,
+      "sm_mhz": {
+        "min": 2340,
+        "max": 2520,
+        "mean": 2512.23
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 44,
+        "max": 57,
+        "mean": 51.62
+      },
+      "power_w": {
+        "min": 100.8,
+        "max": 251.05,
+        "mean": 229.61
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "overlap_on",
+      "num_samples": 18,
+      "sm_mhz": {
+        "min": 2265,
+        "max": 2520,
+        "mean": 2475.83
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 51,
+        "max": 57,
+        "mean": 54.11
+      },
+      "power_w": {
+        "min": 224.62,
+        "max": 252.0,
+        "mean": 238.73
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "overlap_off",
+      "num_samples": 19,
+      "sm_mhz": {
+        "min": 2250,
+        "max": 2520,
+        "mean": 2504.21
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 53,
+        "max": 58,
+        "mean": 54.42
+      },
+      "power_w": {
+        "min": 222.91,
+        "max": 250.87,
+        "mean": 234.47
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 2,
+      "arm": "overlap_off",
+      "num_samples": 19,
+      "sm_mhz": {
+        "min": 2265,
+        "max": 2520,
+        "mean": 2491.58
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 54,
+        "max": 58,
+        "mean": 55.11
+      },
+      "power_w": {
+        "min": 217.77,
+        "max": 250.34,
+        "mean": 233.78
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 3,
+      "arm": "overlap_on",
+      "num_samples": 18,
+      "sm_mhz": {
+        "min": 2415,
+        "max": 2520,
+        "mean": 2509.17
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 55,
+        "max": 59,
+        "mean": 56.33
+      },
+      "power_w": {
+        "min": 218.7,
+        "max": 257.84,
+        "mean": 240.67
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 4,
+      "arm": "overlap_on",
+      "num_samples": 19,
+      "sm_mhz": {
+        "min": 2355,
+        "max": 2520,
+        "mean": 2493.16
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 56,
+        "max": 59,
+        "mean": 57.05
+      },
+      "power_w": {
+        "min": 227.52,
+        "max": 259.55,
+        "mean": 244.51
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 5,
+      "arm": "overlap_off",
+      "num_samples": 19,
+      "sm_mhz": {
+        "min": 2265,
+        "max": 2520,
+        "mean": 2504.21
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 55,
+        "max": 61,
+        "mean": 57.47
+      },
+      "power_w": {
+        "min": 230.02,
+        "max": 255.22,
+        "mean": 239.5
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}

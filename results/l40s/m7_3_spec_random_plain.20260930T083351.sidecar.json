@@ -1,0 +1,289 @@
+{
+  "run_id": "20260930T083351",
+  "config": {
+    "max_running": 64,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 65536,
+    "seed": 0,
+    "disable_radix": false,
+    "chunked_prefill_size": null,
+    "schedule_policy": "fcfs",
+    "disable_overlap": false,
+    "disable_cuda_graph": false,
+    "cuda_graph_max_bs": 64,
+    "attn_workspace_mb": 512,
+    "block_backend": null,
+    "fused_ops": false,
+    "spec_draft": null,
+    "spec_gamma": 4,
+    "model": "8B",
+    "workload": "unique",
+    "groups": 256,
+    "per_group": 1,
+    "prefix_len": 480,
+    "suffix_len": 32,
+    "output_len": 128,
+    "num_long": 8,
+    "long_len": 3072,
+    "long_output_len": 16,
+    "short_len": 256,
+    "long_fraction": 0.25,
+    "short_output_len": 32,
+    "arrival_rate": 0.0,
+    "workload_seed": 0,
+    "ablate": "fused_ops",
+    "rounds": 2,
+    "arms": null,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 300.0,
+    "out": "m7_3_spec_random_plain",
+    "allow_dirty": false,
+    "results_dir": "/out",
+    "engine": {
+      "max_running": 64,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 65536,
+      "seed": 0,
+      "radix": true,
+      "chunked_prefill_size": null,
+      "cuda_graph": true,
+      "overlap": true,
+      "schedule_policy": "fcfs",
+      "cuda_graph_max_bs": 64,
+      "block_backend": null,
+      "attn_workspace_mb": 512,
+      "fused_ops": false
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 818221056,
+      "free_bytes": 30104748032,
+      "total_bytes": 47695921152,
+      "block_bytes": 2359296,
+      "max_blocks": 11171,
+      "num_blocks": 4096,
+      "graph_buckets": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64
+      ],
+      "graph_bytes": 56237568,
+      "graph_capture_s": 0.74
+    }
+  },
+  "environment": {
+    "git_commit": "49db0a156180f891968f29e1dafcb8943005e25a",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.57.04",
+    "cpu": "Intel(R) Xeon(R) 6740E"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 1367319.6748807,
+      "name": "NVIDIA L40S",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 48,
+      "power_w": 38.81,
+      "power_limit_w": 350.0,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 0
+    },
+    "idle_power_limit_w": [
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0
+    ],
+    "power_max_limit_w": 350.0,
+    "host": null
+  },
+  "warmup": {
+    "seconds": 28.4,
+    "runs": 1,
+    "settled_by": "window",
+    "gpu": {
+      "num_samples": 55,
+      "sm_mhz": {
+        "min": 1665,
+        "max": 2520,
+        "mean": 2228.73
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 50,
+        "max": 67,
+        "mean": 62.16
+      },
+      "power_w": {
+        "min": 98.99,
+        "max": 352.9,
+        "mean": 310.88
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "fused_off",
+      "num_samples": 54,
+      "sm_mhz": {
+        "min": 1650,
+        "max": 2520,
+        "mean": 2216.11
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 61,
+        "max": 69,
+        "mean": 65.61
+      },
+      "power_w": {
+        "min": 272.42,
+        "max": 354.05,
+        "mean": 321.81
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "fused_on",
+      "num_samples": 49,
+      "sm_mhz": {
+        "min": 1515,
+        "max": 2520,
+        "mean": 2168.88
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 60,
+        "max": 74,
+        "mean": 69.51
+      },
+      "power_w": {
+        "min": 160.98,
+        "max": 355.01,
+        "mean": 331.06
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 2,
+      "arm": "fused_on",
+      "num_samples": 49,
+      "sm_mhz": {
+        "min": 1470,
+        "max": 2520,
+        "mean": 2140.71
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 68,
+        "max": 77,
+        "mean": 74.0
+      },
+      "power_w": {
+        "min": 309.26,
+        "max": 352.24,
+        "mean": 338.15
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 3,
+      "arm": "fused_off",
+      "num_samples": 55,
+      "sm_mhz": {
+        "min": 1620,
+        "max": 2520,
+        "mean": 2179.64
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 69,
+        "max": 76,
+        "mean": 73.53
+      },
+      "power_w": {
+        "min": 309.26,
+        "max": 358.12,
+        "mean": 331.36
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,288 @@
+{
+  "run_id": "20260930T081912",
+  "config": {
+    "max_running": 32,
+    "max_prefill_tokens": 8192,
+    "attention": "paged",
+    "kv_pool_tokens": 65536,
+    "seed": 0,
+    "disable_radix": false,
+    "chunked_prefill_size": null,
+    "schedule_policy": "fcfs",
+    "disable_overlap": false,
+    "disable_cuda_graph": false,
+    "cuda_graph_max_bs": 32,
+    "attn_workspace_mb": 512,
+    "block_backend": null,
+    "fused_ops": false,
+    "spec_draft": null,
+    "spec_gamma": 4,
+    "model": "8B",
+    "workload": "unique",
+    "groups": 128,
+    "per_group": 1,
+    "prefix_len": 480,
+    "suffix_len": 32,
+    "output_len": 128,
+    "num_long": 8,
+    "long_len": 3072,
+    "long_output_len": 16,
+    "short_len": 256,
+    "long_fraction": 0.25,
+    "short_output_len": 32,
+    "arrival_rate": 0.0,
+    "workload_seed": 0,
+    "ablate": "fused_ops",
+    "rounds": 2,
+    "arms": null,
+    "warmup_min_s": 10.0,
+    "warmup_max_s": 300.0,
+    "out": "m7_3_spec_random_plain",
+    "allow_dirty": false,
+    "results_dir": "/out",
+    "engine": {
+      "max_running": 32,
+      "max_prefill_tokens": 8192,
+      "attention": "paged",
+      "kv_pool_tokens": 65536,
+      "seed": 0,
+      "radix": true,
+      "chunked_prefill_size": null,
+      "cuda_graph": true,
+      "overlap": true,
+      "schedule_policy": "fcfs",
+      "cuda_graph_max_bs": 32,
+      "block_backend": null,
+      "attn_workspace_mb": 512,
+      "fused_ops": false
+    },
+    "kv_profile": {
+      "profile_tokens": 8192,
+      "peak_activation_bytes": 818221056,
+      "free_bytes": 30104748032,
+      "total_bytes": 47695921152,
+      "block_bytes": 2359296,
+      "max_blocks": 11171,
+      "num_blocks": 4096,
+      "graph_buckets": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "graph_bytes": 36481536,
+      "graph_capture_s": 0.63
+    }
+  },
+  "environment": {
+    "git_commit": "49db0a156180f891968f29e1dafcb8943005e25a",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "torch": "2.9.1+cu128",
+    "cuda": "12.8",
+    "flashinfer": "0.6.7.post3",
+    "driver": "610.57.04",
+    "cpu": "Intel(R) Xeon(R) 6740E"
+  },
+  "preflight": {
+    "idle_gpu": {
+      "t": 1366442.071432971,
+      "name": "NVIDIA L40S",
+      "sm_mhz": 210,
+      "mem_mhz": 405,
+      "temp_c": 44,
+      "power_w": 37.4,
+      "power_limit_w": 350.0,
+      "reasons": "0x0000000000000001",
+      "util": 0,
+      "mem_used_mib": 0
+    },
+    "idle_power_limit_w": [
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0,
+      350.0
+    ],
+    "power_max_limit_w": 350.0,
+    "host": null
+  },
+  "warmup": {
+    "seconds": 63.9,
+    "runs": 3,
+    "settled_by": "run",
+    "gpu": {
+      "num_samples": 122,
+      "sm_mhz": {
+        "min": 1545,
+        "max": 2520,
+        "mean": 2335.7
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 46,
+        "max": 69,
+        "mean": 59.39
+      },
+      "power_w": {
+        "min": 91.92,
+        "max": 356.77,
+        "mean": 283.92
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  },
+  "gpu_during_runs": [
+    {
+      "run": 0,
+      "arm": "fused_off",
+      "num_samples": 40,
+      "sm_mhz": {
+        "min": 1665,
+        "max": 2520,
+        "mean": 2305.5
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 63,
+        "max": 73,
+        "mean": 68.4
+      },
+      "power_w": {
+        "min": 275.93,
+        "max": 350.71,
+        "mean": 306.8
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 1,
+      "arm": "fused_on",
+      "num_samples": 37,
+      "sm_mhz": {
+        "min": 1500,
+        "max": 2520,
+        "mean": 2267.03
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 69,
+        "max": 77,
+        "mean": 73.03
+      },
+      "power_w": {
+        "min": 275.99,
+        "max": 351.06,
+        "mean": 318.89
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 2,
+      "arm": "fused_on",
+      "num_samples": 36,
+      "sm_mhz": {
+        "min": 1455,
+        "max": 2520,
+        "mean": 2255.0
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 70,
+        "max": 78,
+        "mean": 74.22
+      },
+      "power_w": {
+        "min": 295.33,
+        "max": 351.53,
+        "mean": 320.73
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    },
+    {
+      "run": 3,
+      "arm": "fused_off",
+      "num_samples": 40,
+      "sm_mhz": {
+        "min": 1575,
+        "max": 2520,
+        "mean": 2300.25
+      },
+      "mem_mhz": {
+        "min": 9001,
+        "max": 9001,
+        "mean": 9001.0
+      },
+      "temp_c": {
+        "min": 71,
+        "max": 77,
+        "mean": 74.1
+      },
+      "power_w": {
+        "min": 284.57,
+        "max": 355.57,
+        "mean": 313.78
+      },
+      "power_limit_w": {
+        "min": 350.0,
+        "max": 350.0,
+        "mean": 350.0
+      },
+      "clocks_event_reasons": [
+        "0x0000000000000000",
+        "0x0000000000000004"
+      ]
+    }
+  ]
+}
