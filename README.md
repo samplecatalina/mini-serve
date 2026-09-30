@@ -1,15 +1,15 @@
 # mini-serve
 
-A single-GPU LLM inference engine: continuous batching, paged KV cache, radix prefix cache, chunked prefill, CPU-GPU overlap scheduling, CUDA Graph decode, a C++ scheduling core, and two-model speculative decoding.
+A single-GPU LLM inference engine: continuous batching, paged KV cache, radix prefix cache, chunked prefill, CPU-GPU overlap scheduling, CUDA Graph decode, fused operators, a C++ scheduling core, and two-model speculative decoding.
 
 Written from [mini-sglang](https://github.com/sgl-project/mini-sglang) (pinned at `9a91cfa`), re-implementing its scheduling features and measuring each with an ablation; the C++ core and speculative decoding have no counterpart in it. `docs/design.md` has the design and where it differs from the blueprint; `docs/optimization-log.md` has every measurement next to the prediction written before it, including the ones that were wrong.
 
 ## Status
 
-M0–M6 are complete (tags `v1.0`, `v1.1-m6`). Next: fused operators on the engine path, behind a switch (M7, planned).
+M0–M7 are complete (tags `v1.0`, `v1.1-m6`, `v1.2-m7`).
 
 - **Implemented and ablated**: continuous batching over a paged KV cache (16-token blocks), admission against a block budget with preemption, radix prefix cache, chunked prefill mixed with decode, decode CUDA Graphs, one-step-lag overlap scheduling, three scheduling policies, GPU-side sampling, an OpenAI-compatible server with streaming; a C++ core for block accounting, block-table packing and the prefix tree; two-model speculative decoding with greedy verification.
-- **Implemented, not the default**: the C++ core is selected with `--block-backend cpp`. It shortens the host path on both GPUs tested but changes nothing end to end in the default configuration; it is 8.6% faster with cache-aware admission under eviction pressure on the L40S node (below). The Python reference stays the default.
+- **Implemented, not the default**: the fused operators (`--fused-ops`): FlashInfer's RMSNorm, fused residual-add + RMSNorm, rotary embedding and SiLU-and-multiply, with Q/K/V and gate/up each one GEMM — the operators the blueprint uses. They are faster on every workload measured (below) and pass the correctness anchor within its tolerance; they stay off by default so that the default path is the one bitwise equal to transformers. The C++ core is selected with `--block-backend cpp`. It shortens the host path on both GPUs tested but changes nothing end to end in the default configuration; it is 8.6% faster with cache-aware admission under eviction pressure on the L40S node (below). The Python reference stays the default.
 - **Designed, not implemented**: rejection sampling for speculative decoding at temperature > 0 (only greedy verification exists); speculative decoding in the HTTP server (it runs through the engine-level harness).
 - **Open work**: listed at the end of `docs/design.md`.
 
@@ -27,6 +27,8 @@ Every number below links to a row under `results/`; Qwen3-0.6B in BF16 unless st
 
 **Against sglang 0.5.10**, same job, same node, ABBA over three rounds (`results/l40s/m4_2_compare.csv`): 61.6% of its throughput at concurrency 1, 89.9% at 32, **101.7% at 256**. At 256 its TTFT p50 is 1,994.1 ms against 275.7 ms here; its TPOT is lower. The per-step cost of this engine is higher; its scheduler emits first tokens sooner.
 
+**With `--fused-ops`**, the same caliber rerun with three servers rotated in one job (`results/l40s/m7_3_serving.csv`): **95.6% / 104.4% / 112.1%** of sglang at concurrency 1 / 32 / 256 (the reference operators 60.0% / 85.9% / 98.9% in the same job). A 0.6B decode step at batch 8 is 3.42 ms against sglang's 3.31 (5.44 on the reference operators; `profiling/l40s/m7_3_0.6B_decode8_*_nodes.nsys-rep`).
+
 **Against the blueprint**, engine to engine on the same token ids, development GPU, 32k-token pool (`results/rtx4060-laptop/m4_4_*`, `m5x_blueprint_*`):
 
 | Workload | This engine ÷ blueprint | Why |
@@ -38,6 +40,8 @@ Every number below links to a row under `results/`; Qwen3-0.6B in BF16 unless st
 | Same requests, declared maximum 128 | 0.815 | Reservation now close to the real length |
 
 The last two rows differ only in the declared maximum: the blueprint's throughput moves 1.72×, this engine's does not.
+
+With `--fused-ops`, rerun in one session (`results/rtx4060-laptop/m7_2_bp_*`): 0.875 / 0.969 / 1.120 / 1.841 / 1.070 for the five rows above. Most of the first row's gap was operators, not admission.
 
 **Ablations on the L40S** (`results/l40s/m4_2_*.csv`):
 
@@ -51,7 +55,7 @@ The last two rows differ only in the declared maximum: the blueprint's throughpu
 
 **C++ core** (`results/rtx4060-laptop/m5_1_5_*`, `m5_2_*`, `results/l40s/m5_7_*`): host path at batch 248 **1.541 → 0.920 ms** on the development host, 2.894 → 1.890 ms on the L40S node; evicting one block from a 19,172-node prefix tree 5,553 µs (Python) → 804 µs (same algorithm in C++) → 1.0 µs (ordered index). End to end: 4,019.2 vs 4,019.2 tok/s on the L40S with first-come-first-served admission — with CUDA Graphs and overlap the saved host time is off the critical path. With cache-aware admission, 4,096 waiting requests and 786k unique prompt tokens through a 335k-token pool, the tree evicts every step (1.2 ms per eviction in Python, 13 µs in C++) and the C++ backend is **8.6% faster**, 7,768.3 vs 7,154.5 tok/s (`results/l40s/m6_7_radix.csv`, alternated A B C C B A in one job).
 
-**Speculative decoding, Qwen3-8B target / 0.6B draft, L40S** (`results/l40s/m5_5_*`, `m5_6_*`, `m6_5_*`): against the default engine, on random prompts 1.97× with one request running, 1.37× at 8, 1.03× at 32, 0.95× at 64; on MT-Bench 1.73×, 1.45×, 1.15×, 1.02× (best γ at each cap). Acceptance at γ=4 is 0.47–0.54 on MT-Bench and 0.54–0.68 on the random prompts of that sweep — random-token acceptance moves with the prompt set (0.431 on another one of the same shape). In sglang on the same token ids the same algorithm is 13–29% faster (13–24% on MT-Bench): a 0.6B decode step at batch 8 takes 3.31 ms there against 5.43 ms here, 1.73 ms of the difference in unfused elementwise kernels. A public EAGLE-3 head emits 1.8–2.2 tokens per round on random prompts against 3.1–3.7 for the 0.6B draft, but 2.6–2.8 against 2.9–3.1 on MT-Bench, where it is the faster of the two at every cap (1.97× → 1.29× over sglang's default, against 1.78× → 1.09×). With tree verification it goes further (`results/l40s/m6_6_eagle3.csv`): the best shape gives 2.59× / 2.03× / 1.65× over sglang's default at caps 1 / 8 / 32, 1.24–1.45× the two-model path — on conversational text, tree-verified EAGLE-3 is the stronger algorithm. The largest tree (32 tokens verified per request per round) is nearly free at one request and falls to 1.05× at cap 32, where the card reaches its power limit; a second public head (AngelSlim) accepts 23–26% fewer tokens per round.
+**Speculative decoding, Qwen3-8B target / 0.6B draft, L40S** (`results/l40s/m5_5_*`, `m5_6_*`, `m6_5_*`): against the default engine, on random prompts 1.97× with one request running, 1.37× at 8, 1.03× at 32, 0.95× at 64; on MT-Bench 1.73×, 1.45×, 1.15×, 1.02× (best γ at each cap). Acceptance at γ=4 is 0.47–0.54 on MT-Bench and 0.54–0.68 on the random prompts of that sweep — random-token acceptance moves with the prompt set (0.431 on another one of the same shape). In sglang on the same token ids the same algorithm is 13–29% faster (13–24% on MT-Bench): a 0.6B decode step at batch 8 takes 3.31 ms there against 5.43 ms here, 1.73 ms of the difference in unfused elementwise kernels. With `--fused-ops` that reverses (`results/l40s/m7_3_spec_*`): γ=4 gains 24–36%, the two-model path is 2–17% faster than sglang's, and the best speedup over the plain engine becomes 2.35× / 1.06× at caps 1 / 64 on random prompts and 2.08× / 1.22× on MT-Bench. A public EAGLE-3 head emits 1.8–2.2 tokens per round on random prompts against 3.1–3.7 for the 0.6B draft, but 2.6–2.8 against 2.9–3.1 on MT-Bench, where it is the faster of the two at every cap (1.97× → 1.29× over sglang's default, against 1.78× → 1.09×). With tree verification it goes further (`results/l40s/m6_6_eagle3.csv`): the best shape gives 2.59× / 2.03× / 1.65× over sglang's default at caps 1 / 8 / 32, 1.24–1.45× the two-model path — on conversational text, tree-verified EAGLE-3 is the stronger algorithm. The largest tree (32 tokens verified per request per round) is nearly free at one request and falls to 1.05× at cap 32, where the card reaches its power limit; a second public head (AngelSlim) accepts 23–26% fewer tokens per round.
 
 **Overlap across three platforms**, one offline harness, pinned pool (`results/*/m5_7_overlap.csv`):
 
